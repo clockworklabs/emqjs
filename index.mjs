@@ -88,15 +88,30 @@ function js2vm(jsValue) {
           if (name === 'constructor' || typeof name === 'symbol') {
             continue;
           }
-          vm.defineProp(vmObject, name, {
+          let vmDesc = {
             configurable: desc.configurable,
-            enumerable: desc.enumerable,
-            get: () => js2vm(desc.get.call(jsValue)),
-            set: desc.set
-              ? value => js2vm(desc.set.call(jsValue, vm.dump(value)))
-              : undefined,
-            value: desc.value !== undefined ? js2vm(desc.value) : undefined
-          });
+            enumerable: desc.enumerable
+          };
+          if ('get' in desc) {
+            vmDesc.get = () => {
+              let value = desc.get.call(jsValue);
+              if (typeof value === 'function') {
+                value = value.bind(jsValue);
+              }
+              return js2vm(value);
+            };
+          }
+          if ('set' in desc) {
+            vmDesc.set = value => js2vm(desc.set.call(jsValue, vm.dump(value)));
+          }
+          if ('value' in desc) {
+            let value = desc.value;
+            if (typeof value === 'function') {
+              value = value.bind(jsValue);
+            }
+            vmDesc.value = js2vm(value);
+          }
+          vm.defineProp(vmObject, name, vmDesc);
         }
         return vmObject;
       }
