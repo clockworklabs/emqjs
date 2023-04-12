@@ -12,10 +12,20 @@ let argHandles;
 
 let wasmMemory;
 
+let knownFuncsByJS = new Map();
+let knownFuncsByIndex = [];
+
 /**
  * @param {import("quickjs-emscripten").QuickJSHandle} vmFunction
  */
 function vm2func(vmFunction, convertValue = true) {
+  if (vm.typeof(vmFunction) !== 'function') {
+    throw new Error(`Expected a function, got ${vm.typeof(vmFunction)}`);
+  }
+  let vmFuncIndex = vm.getProp(vmFunction, 'vmFuncIndex').consume(vm.getNumber);
+  if (!Number.isNaN(vmFuncIndex)) {
+    return knownFuncsByIndex[vmFuncIndex];
+  }
   return (/** @type {any[]} */ ...args) => {
     // Copy all the Wasm memory to JS so that modifications from Wasm are reflected in JS.
     // TODO: handle growth.
@@ -61,11 +71,6 @@ function js2vm(jsValue) {
     case 'object':
       if (jsValue === null) {
         return vm.null;
-      }
-      if (jsValue instanceof Promise) {
-        let promise = vm.newPromise(jsValue.then(js2vm));
-        promise.settled.then(() => vm.runtime.executePendingJobs());
-        return promise.handle;
       }
       if (jsValue instanceof Error) {
         return vm.newError(jsValue);
@@ -132,14 +137,27 @@ function js2vm(jsValue) {
       }
       throw new Error(`Unsupported JS object ${inspect(jsValue)}`);
     case 'function':
-      return vm.newFunction(jsValue.name, (...args) => {
-        argHandles = args;
-        try {
-          return js2vm(jsValue(...args.map(vm.dump)));
-        } finally {
-          argHandles = undefined;
-        }
-      });
+      let vmFunc = knownFuncsByJS.get(jsValue);
+      if (!vmFunc) {
+        vmFunc = vm.newFunction(jsValue.name, (...args) => {
+          argHandles = args;
+          try {
+            return js2vm(jsValue(...args.map(vm.dump)));
+          } finally {
+            argHandles = undefined;
+          }
+        });
+        vm.setProp(
+          vmFunc,
+          'vmFuncIndex',
+          vm.newNumber(knownFuncsByIndex.length)
+        );
+        knownFuncsByIndex.push(jsValue);
+        knownFuncsByJS.set(jsValue, vmFunc.dup());
+      } else {
+        vmFunc = vmFunc.dup();
+      }
+      return vmFunc;
     default:
       throw new Error(`Unsupported JS type ${typeof jsValue}`);
   }
@@ -172,7 +190,7 @@ setGlobals({
       return vm
         .getProp(vm.global, 'Object')
         .consume(vmObject => vm.getProp(vmObject, 'keys'))
-        .consume(async vmObject_keys_handle => {
+        .consume(vmObject_keys_handle => {
           let vmObject_keys = (
             /** @type {import("quickjs-emscripten").QuickJSHandle} */ handle
           ) =>
@@ -197,11 +215,16 @@ setGlobals({
             });
           }
 
-          let instance = await WebAssembly.instantiate(Module_wasm, imports);
+          let instance = new WebAssembly.Instance(Module_wasm, imports);
           wasmMemory = instance.exports.memory;
           return {
-            instance: {
-              exports: instance.exports
+            then: () => {
+              let resolve = vm2func(argHandles[0]);
+              resolve({
+                instance: {
+                  exports: instance.exports
+                }
+              });
             }
           };
         });
@@ -219,11 +242,10 @@ function unwrapResult(result, convertValue = true) {
   }
   let error = result.error.consume(vm.dump);
   if (typeof error === 'object' && 'stack' in error) {
-    let err = new (globalThis[error.name] || Error)(error.message);
-    err.stack = `${error.name}: ${error.message}\n${error.stack}${err.stack
-      .split('\n')
-      .slice(1)
-      .join('\n')}`;
+    let err = new (globalThis[error.name] || Error)(
+      `${error.message}\n${error.stack}`
+    );
+    err.stack = `${error.name}: ${error.message}\n${error.stack}---\n${err.stack}`;
     error = err;
   }
   throw error;
