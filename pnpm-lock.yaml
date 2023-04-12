@@ -1,0 +1,13 @@
+lockfileVersion: 5.4
+
+specifiers:
+  quickjs-emscripten: ^0.22.0
+
+dependencies:
+  quickjs-emscripten: 0.22.0
+
+packages:
+
+  /quickjs-emscripten/0.22.0:
+    resolution: {integrity: sha512-v73d6VqmXQvBWkorM/5W3bL1kRGhBwhKq3IIMnYp/FN5TSwjWrGBl/eBMone9o4/0DFioxQ23AGIQKG9Hx9Qtg==}
+    dev: false
