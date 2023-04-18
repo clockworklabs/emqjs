@@ -12,10 +12,15 @@ pub enum ValueKind {
 }
 
 #[derive(Archive, Serialize)]
-pub struct Func {
-    pub name: String,
+pub struct FuncType {
     pub params: Vec<ValueKind>,
     pub result: Option<ValueKind>,
+}
+
+#[derive(Archive, Serialize)]
+pub struct Func {
+    pub name: String,
+    pub ty: FuncType,
 }
 
 #[derive(Default, Archive, Serialize)]

@@ -65,14 +65,14 @@ extern "C" fn emqjs_invoke(index: usize) {
     let imports_ctx = imports_ctx_lock
         .as_ref()
         .expect("imports weren't provided yet");
-    let req = &imports_ctx.module.imports[index];
+    let ty = &imports_ctx.module.imports[index].ty;
     let func = &imports_ctx.funcs[index];
     CONTEXT
         .get()
         .expect("Context wasn't initialized yet")
         .with(|ctx| -> rquickjs::Result<()> {
             // todo: try to avoid this allocation
-            let args = req
+            let args = ty
                 .params
                 .iter()
                 .zip(unsafe { EMQJS_VALUE_SPACE.iter() })
@@ -84,7 +84,7 @@ extern "C" fn emqjs_invoke(index: usize) {
                 })
                 .collect::<rquickjs::Result<Vec<_>>>()?;
             let result = func.clone().restore(ctx)?.call((Rest(args),))?;
-            if let Some(&result_type) = req.result.as_ref() {
+            if let Some(&result_type) = ty.result.as_ref() {
                 let result_dst = unsafe { EMQJS_VALUE_SPACE.get_unchecked_mut(0) };
                 match result_type {
                     ValueKind::I32 => result_dst.i32 = i32::from_js(ctx, result)?,
