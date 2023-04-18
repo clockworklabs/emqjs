@@ -44,15 +44,8 @@ mod console {
 mod web_assembly {
     use super::*;
 
-    #[quickjs(has_refs)]
+    #[quickjs(has_refs, cloneable)]
     #[derive(HasRefs, Clone)]
-    pub struct InstantiationResult {
-        #[quickjs(has_refs)]
-        instance: Arc<Instance>,
-    }
-
-    #[quickjs(has_refs)]
-    #[derive(HasRefs)]
     pub struct InstantiationResultPromiseLike {
         #[quickjs(has_refs)]
         result: InstantiationResult,
@@ -60,15 +53,36 @@ mod web_assembly {
 
     impl InstantiationResultPromiseLike {
         pub fn then<'js>(&'js self, resolve: Function<'js>) -> rquickjs::Result<Value> {
-            resolve.call((self.result.clone(),))
+            resolve.call((&self.result,))
         }
     }
 
-    #[quickjs(has_refs)]
-    #[derive(HasRefs)]
+    #[quickjs(has_refs, cloneable)]
+    #[derive(HasRefs, Clone)]
+    pub struct InstantiationResult {
+        #[quickjs(has_refs)]
+        instance: crate::web_assembly::Instance,
+    }
+
+    impl InstantiationResult {
+        #[quickjs(get)]
+        pub fn instance(&self) -> &Instance {
+            &self.instance
+        }
+    }
+
+    #[quickjs(has_refs, cloneable)]
+    #[derive(HasRefs, Clone)]
     pub struct Instance {
         #[quickjs(has_refs)]
-        exports: HashMap<String, Function<'static>>,
+        exports: rquickjs::Persistent<rquickjs::Object<'static>>,
+    }
+
+    impl Instance {
+        #[quickjs(get)]
+        pub fn exports(&self) -> rquickjs::Persistent<rquickjs::Object<'static>> {
+            self.exports.clone()
+        }
     }
 
     pub fn instantiate<'js>(
@@ -76,11 +90,12 @@ mod web_assembly {
         _module: &other::Module,
         imports: Object<'js>,
     ) -> rquickjs::Result<InstantiationResultPromiseLike> {
-        imports::provide_imports(ctx, imports.get("env")?)?;
-        let mut exports = HashMap::new();
+        let exports = imports::provide_imports(ctx, imports.get("env")?)?;
         Ok(InstantiationResultPromiseLike {
             result: InstantiationResult {
-                instance: Arc::new(Instance { exports }),
+                instance: Instance {
+                    exports: rquickjs::Persistent::save(ctx, exports),
+                },
             },
         })
     }

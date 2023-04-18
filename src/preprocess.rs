@@ -1,7 +1,6 @@
 use anyhow::Context;
 use emqjs_data_structures::{Func, FuncType, ValueKind};
-use std::fs;
-use walrus::ir::{InstrSeqType, LoadKind, MemArg, StoreKind, Value};
+use walrus::ir::{LoadKind, MemArg, StoreKind, Value};
 use walrus::*;
 
 struct ReplacementFunc {

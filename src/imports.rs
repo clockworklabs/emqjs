@@ -2,7 +2,7 @@ use crate::CONTEXT;
 use anyhow::Context;
 use emqjs_data_structures::{Module, ValueKind};
 use rkyv::Archive;
-use rquickjs::{Ctx, FromJs};
+use rquickjs::{Ctx, FromJs, IteratorJs};
 use rquickjs::{IntoJs, Rest};
 use std::sync::Mutex;
 
@@ -25,11 +25,13 @@ static mut EMQJS_VALUE_SPACE: [Value; 1024] = [Value { i64: 0 }; 1024];
 struct WasmCtx {
     module: &'static <Module as Archive>::Archived,
     imports: Box<[rquickjs::Persistent<rquickjs::Function<'static>>]>,
-    exports: Box<[rquickjs::Persistent<rquickjs::Function<'static>>]>,
 }
 
 impl WasmCtx {
-    fn new<'js>(ctx: rquickjs::Ctx<'js>, imports: rquickjs::Object<'js>) -> rquickjs::Result<Self> {
+    fn new<'js>(
+        ctx: rquickjs::Ctx<'js>,
+        imports: rquickjs::Object<'js>,
+    ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
         let module = unsafe {
             rkyv::archived_root::<Module>(
                 // careful: single `&` would read the entire array into stack
@@ -46,39 +48,32 @@ impl WasmCtx {
             })
             .collect::<rquickjs::Result<_>>()?;
 
-        let exports = module
-            .exports
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let func = rquickjs::Function::new(
-                    ctx,
-                    move |ctx: Ctx<'js>, params: Rest<rquickjs::Value<'js>>| {
-                        e.ty.params
-                            .iter()
-                            .zip(params.into_inner())
-                            .map(|(kind, value)| from_js(ctx, *kind, value))
-                            .zip(unsafe { EMQJS_VALUE_SPACE.iter_mut() })
-                            .try_for_each(|(value, slot)| value.map(|value| *slot = value))?;
+        let exports = rquickjs::Object::new(ctx)?;
 
-                        unsafe { emqjs_invoke_export(i) };
+        module.exports.iter().enumerate().try_for_each(|(i, e)| {
+            let func = rquickjs::Function::new(
+                ctx,
+                move |ctx: Ctx<'js>, params: Rest<rquickjs::Value<'js>>| {
+                    e.ty.params
+                        .iter()
+                        .zip(params.into_inner())
+                        .map(|(kind, value)| from_js(ctx, *kind, value))
+                        .zip(unsafe { EMQJS_VALUE_SPACE.iter_mut() })
+                        .try_for_each(|(value, slot)| value.map(|value| *slot = value))?;
 
-                        e.ty.result
-                            .as_ref()
-                            .map(|kind| into_js(ctx, *kind, unsafe { EMQJS_VALUE_SPACE[0] }))
-                            .transpose()
-                    },
-                )?;
+                    unsafe { emqjs_invoke_export(i) };
 
-                Ok(rquickjs::Persistent::save(ctx, func))
-            })
-            .collect::<rquickjs::Result<_>>()?;
+                    e.ty.result
+                        .as_ref()
+                        .map(|kind| into_js(ctx, *kind, unsafe { EMQJS_VALUE_SPACE[0] }))
+                        .transpose()
+                },
+            )?;
 
-        Ok(WasmCtx {
-            module,
-            imports,
-            exports,
-        })
+            exports.set(e.name.as_str(), func)
+        })?;
+
+        Ok((WasmCtx { module, imports }, exports))
     }
 }
 
@@ -88,9 +83,10 @@ static IMPORTS_CTX: Mutex<Option<WasmCtx>> = Mutex::new(None);
 pub fn provide_imports<'js>(
     ctx: rquickjs::Ctx<'js>,
     imports: rquickjs::Object<'js>,
-) -> rquickjs::Result<()> {
-    *IMPORTS_CTX.lock().unwrap() = Some(WasmCtx::new(ctx, imports)?);
-    Ok(())
+) -> rquickjs::Result<rquickjs::Object<'js>> {
+    let (wasm_ctx, exports) = WasmCtx::new(ctx, imports)?;
+    *IMPORTS_CTX.lock().unwrap() = Some(wasm_ctx);
+    Ok(exports)
 }
 
 fn into_js(ctx: Ctx, kind: ValueKind, value: Value) -> rquickjs::Result<rquickjs::Value<'_>> {
