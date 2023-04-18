@@ -105,13 +105,17 @@ pub static CONTEXT: OnceCell<Context> = OnceCell::new();
 
 fn main() -> anyhow::Result<()> {
     CONTEXT
-        .get_or_try_init(|| {
+        .get_or_try_init(|| -> rquickjs::Result<_> {
             let runtime = Runtime::new()?;
-            Context::full(&runtime)
+            let context = Context::full(&runtime)?;
+            context.with(|ctx| -> rquickjs::Result<_> {
+                ctx.globals().init_def::<Console>()?;
+                ctx.globals().init_def::<WebAssembly>()?;
+                Ok(())
+            })?;
+            Ok(context)
         })?
         .with(|ctx| -> rquickjs::Result<()> {
-            ctx.globals().init_def::<Console>()?;
-            ctx.globals().init_def::<WebAssembly>()?;
             ctx.eval("WebAssembly.compile()")?;
             Ok(())
         })?;
