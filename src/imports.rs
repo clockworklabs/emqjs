@@ -2,7 +2,7 @@ use crate::CONTEXT;
 use anyhow::Context;
 use emqjs_data_structures::{Module, ValueKind};
 use rkyv::Archive;
-use rquickjs::FromJs;
+use rquickjs::{Ctx, FromJs};
 use rquickjs::{IntoJs, Rest};
 use std::sync::Mutex;
 
@@ -22,12 +22,13 @@ union Value {
 #[no_mangle]
 static mut EMQJS_VALUE_SPACE: [Value; 1024] = [Value { i64: 0 }; 1024];
 
-struct ImportsCtx {
+struct WasmCtx {
     module: &'static <Module as Archive>::Archived,
-    funcs: Box<[rquickjs::Persistent<rquickjs::Function<'static>>]>,
+    imports: Box<[rquickjs::Persistent<rquickjs::Function<'static>>]>,
+    exports: Box<[rquickjs::Persistent<rquickjs::Function<'static>>]>,
 }
 
-impl ImportsCtx {
+impl WasmCtx {
     fn new<'js>(ctx: rquickjs::Ctx<'js>, imports: rquickjs::Object<'js>) -> rquickjs::Result<Self> {
         let module = unsafe {
             rkyv::archived_root::<Module>(
@@ -35,7 +36,8 @@ impl ImportsCtx {
                 std::ptr::read_volatile(&&EMQJS_ENCODED_MODULE).as_slice(),
             )
         };
-        let funcs = module
+
+        let imports = module
             .imports
             .iter()
             .map(|i| {
@@ -44,29 +46,93 @@ impl ImportsCtx {
             })
             .collect::<rquickjs::Result<_>>()?;
 
-        Ok(ImportsCtx { module, funcs })
+        let exports = module
+            .exports
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let func = rquickjs::Function::new(
+                    ctx,
+                    move |ctx: Ctx<'js>, params: Rest<rquickjs::Value<'js>>| {
+                        e.ty.params
+                            .iter()
+                            .zip(params.into_inner())
+                            .map(|(kind, value)| from_js(ctx, *kind, value))
+                            .zip(unsafe { EMQJS_VALUE_SPACE.iter_mut() })
+                            .try_for_each(|(value, slot)| value.map(|value| *slot = value))?;
+
+                        unsafe { emqjs_invoke_export(i) };
+
+                        e.ty.result
+                            .as_ref()
+                            .map(|kind| into_js(ctx, *kind, unsafe { EMQJS_VALUE_SPACE[0] }))
+                            .transpose()
+                    },
+                )?;
+
+                Ok(rquickjs::Persistent::save(ctx, func))
+            })
+            .collect::<rquickjs::Result<_>>()?;
+
+        Ok(WasmCtx {
+            module,
+            imports,
+            exports,
+        })
     }
 }
 
 // ideally this would be OnceCell but ImportsCtx is !Send, so we need a full Mutex
-static IMPORTS_CTX: Mutex<Option<ImportsCtx>> = Mutex::new(None);
+static IMPORTS_CTX: Mutex<Option<WasmCtx>> = Mutex::new(None);
 
 pub fn provide_imports<'js>(
     ctx: rquickjs::Ctx<'js>,
     imports: rquickjs::Object<'js>,
 ) -> rquickjs::Result<()> {
-    *IMPORTS_CTX.lock().unwrap() = Some(ImportsCtx::new(ctx, imports)?);
+    *IMPORTS_CTX.lock().unwrap() = Some(WasmCtx::new(ctx, imports)?);
     Ok(())
 }
 
+fn into_js(ctx: Ctx, kind: ValueKind, value: Value) -> rquickjs::Result<rquickjs::Value<'_>> {
+    unsafe {
+        match kind {
+            ValueKind::I32 => value.i32.into_js(ctx),
+            ValueKind::I64 => value.i64.into_js(ctx),
+            ValueKind::F32 => value.f32.into_js(ctx),
+            ValueKind::F64 => value.f64.into_js(ctx),
+        }
+    }
+}
+
+fn from_js<'js>(
+    ctx: Ctx<'js>,
+    kind: ValueKind,
+    value: rquickjs::Value<'js>,
+) -> rquickjs::Result<Value> {
+    Ok(match kind {
+        ValueKind::I32 => Value {
+            i32: i32::from_js(ctx, value)?,
+        },
+        ValueKind::I64 => Value {
+            i64: i64::from_js(ctx, value)?,
+        },
+        ValueKind::F32 => Value {
+            f32: f32::from_js(ctx, value)?,
+        },
+        ValueKind::F64 => Value {
+            f64: f64::from_js(ctx, value)?,
+        },
+    })
+}
+
 #[no_mangle]
-extern "C" fn emqjs_invoke(index: usize) {
+extern "C" fn emqjs_invoke_import(index: usize) {
     let imports_ctx_lock = IMPORTS_CTX.lock().unwrap();
     let imports_ctx = imports_ctx_lock
         .as_ref()
         .expect("imports weren't provided yet");
     let ty = &imports_ctx.module.imports[index].ty;
-    let func = &imports_ctx.funcs[index];
+    let func = &imports_ctx.imports[index];
     CONTEXT
         .get()
         .expect("Context wasn't initialized yet")
@@ -76,24 +142,20 @@ extern "C" fn emqjs_invoke(index: usize) {
                 .params
                 .iter()
                 .zip(unsafe { EMQJS_VALUE_SPACE.iter() })
-                .map(|(ty, value)| match ty {
-                    ValueKind::I32 => unsafe { value.i32 }.into_js(ctx),
-                    ValueKind::I64 => unsafe { value.i64 }.into_js(ctx),
-                    ValueKind::F32 => unsafe { value.f32 }.into_js(ctx),
-                    ValueKind::F64 => unsafe { value.f64 }.into_js(ctx),
-                })
+                .map(|(ty, value)| into_js(ctx, *ty, *value))
                 .collect::<rquickjs::Result<Vec<_>>>()?;
             let result = func.clone().restore(ctx)?.call((Rest(args),))?;
             if let Some(&result_type) = ty.result.as_ref() {
-                let result_dst = unsafe { EMQJS_VALUE_SPACE.get_unchecked_mut(0) };
-                match result_type {
-                    ValueKind::I32 => result_dst.i32 = i32::from_js(ctx, result)?,
-                    ValueKind::I64 => result_dst.i64 = i64::from_js(ctx, result)?,
-                    ValueKind::F32 => result_dst.f32 = f32::from_js(ctx, result)?,
-                    ValueKind::F64 => result_dst.f64 = f64::from_js(ctx, result)?,
+                let value = from_js(ctx, result_type, result)?;
+                unsafe {
+                    *EMQJS_VALUE_SPACE.get_unchecked_mut(0) = value;
                 }
             }
             Ok(())
         })
         .unwrap()
+}
+
+extern "C" {
+    fn emqjs_invoke_export(index: usize);
 }

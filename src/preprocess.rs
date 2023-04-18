@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
     // First memory (usually the only one) is the main.
     let memory = module.memories.iter().next().unwrap().id();
 
-    let emqjs_invoke = get_export(&module, "emqjs_invoke")
+    let emqjs_invoke_import = get_export(&module, "emqjs_invoke_import")
         .and_then(unwrap_enum!(ExportItem::Function))
         .copied()?;
 
@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
             })?;
         }
         new_func_body.i32_const(replacement.table_index);
-        new_func_body.call(emqjs_invoke);
+        new_func_body.call(emqjs_invoke_import);
         for (i, &result_ty) in func_ty.results().iter().enumerate() {
             EmqjsSlot {
                 builder: &mut new_func_body,
@@ -216,9 +216,10 @@ fn main() -> anyhow::Result<()> {
 
         let emqjs_invoke_export_id = emqjs_invoke_export.finish(vec![], &mut module.funcs);
 
-        module
-            .exports
-            .add("emqjs_invoke", ExportItem::Function(emqjs_invoke_export_id));
+        module.exports.add(
+            "emqjs_invoke_export",
+            ExportItem::Function(emqjs_invoke_export_id),
+        );
     }
 
     module.data.add(
