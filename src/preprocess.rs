@@ -1,6 +1,5 @@
 use anyhow::Context;
-use emqjs_data_structures::{ImportRequest, ImportRequests, ValueKind};
-use std::collections::HashMap;
+use emqjs_data_structures::{Func, ValueKind};
 use std::fs;
 use walrus::ir::{LoadKind, MemArg, StoreKind, Value};
 use walrus::*;
@@ -51,10 +50,11 @@ fn convert_type(ty: ValType) -> anyhow::Result<ValueKind> {
 
 fn main() -> anyhow::Result<()> {
     let mut module = walrus::Module::from_file("temp.wasm")?;
+    let js = std::fs::read("temp.js")?;
 
     let emqjs_value_space_ptr = get_pointer_global(&module, "EMQJS_VALUE_SPACE")?;
 
-    let mut emqjs_imports = ImportRequests::new();
+    let mut emqjs_module = emqjs_data_structures::Module::default();
 
     let replacements = module
         .imports
@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
         .map(|(table_index, (import_id, func_id, name))| {
             let func_ty = module.types.get(module.funcs.get(func_id).ty());
 
-            emqjs_imports.push(ImportRequest {
+            emqjs_module.imports.push(Func {
                 name: name.to_string(),
                 params: func_ty
                     .params()
@@ -102,7 +102,15 @@ fn main() -> anyhow::Result<()> {
                 get_pointer_global(&module, "EMQJS_IMPORTS")? as u32
             ),
         }),
-        rkyv::to_bytes::<_, 1024>(&emqjs_imports)?.into_vec(),
+        rkyv::to_bytes::<_, 1024>(&emqjs_module)?.into_vec(),
+    );
+
+    module.data.add(
+        DataKind::Active(ActiveData {
+            memory,
+            location: ActiveDataLocation::Absolute(get_pointer_global(&module, "EMQJS_JS")? as u32),
+        }),
+        js,
     );
 
     let emqjs_invoke = get_export(&module, "emqjs_invoke")

@@ -5,17 +5,21 @@ use rkyv::{Archive, Serialize};
 #[derive(Archive, Serialize, Clone, Copy)]
 #[archive(as = "ValueKind")]
 pub enum ValueKind {
-    I32 = 1,
-    I64 = 2,
-    F32 = 3,
-    F64 = 4,
+    I32,
+    I64,
+    F32,
+    F64,
 }
 
 #[derive(Archive, Serialize)]
-pub struct ImportRequest {
+pub struct Func {
     pub name: String,
     pub params: Vec<ValueKind>,
     pub result: Option<ValueKind>,
 }
 
-pub type ImportRequests = Vec<ImportRequest>;
+#[derive(Default, Archive, Serialize)]
+pub struct Module {
+    pub imports: Vec<Func>,
+    pub exports: Vec<Func>,
+}

@@ -103,6 +103,9 @@ mod other {
 
 pub static CONTEXT: OnceCell<Context> = OnceCell::new();
 
+#[no_mangle]
+static EMQJS_JS: [u8; 1_048_576] = [0; 1_048_576];
+
 fn main() -> anyhow::Result<()> {
     CONTEXT
         .get_or_try_init(|| -> rquickjs::Result<_> {
@@ -116,7 +119,7 @@ fn main() -> anyhow::Result<()> {
             Ok(context)
         })?
         .with(|ctx| -> rquickjs::Result<()> {
-            ctx.eval("WebAssembly.compile()")?;
+            ctx.eval(&EMQJS_JS[..EMQJS_JS.iter().position(|b| *b == 0).unwrap_or(0)])?;
             Ok(())
         })?;
     Ok(())

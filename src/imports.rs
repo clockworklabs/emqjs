@@ -1,6 +1,6 @@
 use crate::CONTEXT;
 use anyhow::Context;
-use emqjs_data_structures::{ImportRequests, ValueKind};
+use emqjs_data_structures::{Module, ValueKind};
 use rkyv::Archive;
 use rquickjs::FromJs;
 use rquickjs::{IntoJs, Rest};
@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 /// encoded Vec<ImportRequest>
 #[no_mangle]
-static EMQJS_ENCODED_IMPORT_REQUESTS: [u8; 10240] = [0; 10240];
+static EMQJS_ENCODED_MODULE: [u8; 10240] = [0; 10240];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -23,19 +23,20 @@ union Value {
 static mut EMQJS_VALUE_SPACE: [Value; 1024] = [Value { i64: 0 }; 1024];
 
 struct ImportsCtx {
-    import_requests: &'static <ImportRequests as Archive>::Archived,
+    module: &'static <Module as Archive>::Archived,
     funcs: Box<[rquickjs::Persistent<rquickjs::Function<'static>>]>,
 }
 
 impl ImportsCtx {
     fn new<'js>(ctx: rquickjs::Ctx<'js>, imports: rquickjs::Object<'js>) -> rquickjs::Result<Self> {
-        let import_requests = unsafe {
-            rkyv::archived_root::<ImportRequests>(
+        let module = unsafe {
+            rkyv::archived_root::<Module>(
                 // careful: single `&` would read the entire array into stack
-                std::ptr::read_volatile(&&EMQJS_ENCODED_IMPORT_REQUESTS).as_slice(),
+                std::ptr::read_volatile(&&EMQJS_ENCODED_MODULE).as_slice(),
             )
         };
-        let funcs = import_requests
+        let funcs = module
+            .imports
             .iter()
             .map(|i| {
                 let func: rquickjs::Function = imports.get(i.name.as_str())?;
@@ -43,10 +44,7 @@ impl ImportsCtx {
             })
             .collect::<rquickjs::Result<_>>()?;
 
-        Ok(ImportsCtx {
-            import_requests,
-            funcs,
-        })
+        Ok(ImportsCtx { module, funcs })
     }
 }
 
@@ -67,7 +65,7 @@ extern "C" fn emqjs_invoke(index: usize) {
     let imports_ctx = imports_ctx_lock
         .as_ref()
         .expect("imports weren't provided yet");
-    let req = &imports_ctx.import_requests[index];
+    let req = &imports_ctx.module.imports[index];
     let func = &imports_ctx.funcs[index];
     CONTEXT
         .get()
