@@ -1,5 +1,5 @@
 use anyhow::Context;
-use emqjs_data_structures::{Func, FuncType, ValueKind};
+use emqjs_data_structures::{Func, FuncType, Module as EmqjsModule, ValueKind};
 use walrus::ir::{Block, LoadKind, MemArg, StoreKind, Value};
 use walrus::*;
 
@@ -16,31 +16,6 @@ macro_rules! unwrap_enum {
             _ => anyhow::bail!("Expected {expr:?} to be of type {}", stringify!($path)),
         }
     };
-}
-
-fn take_export(module: &mut Module, name: &'static str) -> anyhow::Result<ExportItem> {
-    let export = module
-        .exports
-        .iter_mut()
-        .find(|e| e.name == name)
-        .context(format!("Could not find `{name}` export"))?;
-
-    let export_item = export.item;
-
-    let export_id = export.id();
-    module.exports.delete(export_id);
-
-    Ok(export_item)
-}
-
-fn take_pointer_global(module: &mut Module, name: &'static str) -> anyhow::Result<i32> {
-    take_export(module, name)
-        .and_then(unwrap_enum!(ExportItem::Global))
-        .map(|g| &module.globals.get(g).kind)
-        .and_then(unwrap_enum!(GlobalKind::Local))
-        .and_then(unwrap_enum!(InitExpr::Value))
-        .and_then(unwrap_enum!(Value::I32))
-        .copied()
 }
 
 fn convert_type(ty: ValType) -> anyhow::Result<ValueKind> {
@@ -69,35 +44,64 @@ fn convert_func_type(ty: &Type) -> anyhow::Result<FuncType> {
     })
 }
 
-fn main() -> anyhow::Result<()> {
-    let mut module = walrus::Module::from_file("temp.wasm")?;
+struct PreprocessCtx {
+    module: Module,
+    emqjs_value_space: EmqjsValueSpace,
+    memory: MemoryId,
+}
 
-    let emqjs_value_space_ptr = take_pointer_global(&mut module, "EMQJS_VALUE_SPACE")?;
-
-    let mut emqjs_module = emqjs_data_structures::Module::default();
-
-    // First memory (usually the only one) is the main.
-    let memory = module.memories.iter().next().unwrap().id();
-
-    let emqjs_invoke_import = take_export(&mut module, "emqjs_invoke_import")
-        .and_then(unwrap_enum!(ExportItem::Function))?;
-
-    // Replace env imports with trampolines.
-    let mut delete_imports = Vec::new();
-
-    module
-        .imports
+fn take_export(module: &mut Module, name: &'static str) -> anyhow::Result<ExportItem> {
+    let export = module
+        .exports
         .iter_mut()
-        .filter_map(|i| match i.kind {
-            ImportKind::Function(func_id) if i.module == "env" => {
-                Some((i.id(), func_id, i.name.as_str()))
-            }
-            _ => None,
-        })
-        .enumerate()
-        .try_for_each(
-            |(table_index, (import_id, func_id, name))| -> anyhow::Result<()> {
-                let func_ty = module.types.get(module.funcs.get(func_id).ty()).clone();
+        .find(|e| e.name == name)
+        .context(format!("Could not find `{name}` export"))?;
+
+    let export_item = export.item;
+
+    let export_id = export.id();
+    module.exports.delete(export_id);
+
+    Ok(export_item)
+}
+
+fn take_pointer_global(module: &mut Module, name: &'static str) -> anyhow::Result<i32> {
+    take_export(module, name)
+        .and_then(unwrap_enum!(ExportItem::Global))
+        .map(|g| &module.globals.get(g).kind)
+        .and_then(unwrap_enum!(GlobalKind::Local))
+        .and_then(unwrap_enum!(InitExpr::Value))
+        .and_then(unwrap_enum!(Value::I32))
+        .copied()
+}
+
+impl PreprocessCtx {
+    /// Replace env imports with trampolines to `emqjs_invoke_import` that store params-results in `EMQJS_VALUE_SPACE`.
+    ///
+    /// Returns list of function descriptors for the JS side.
+    fn process_imports(&mut self) -> anyhow::Result<Vec<Func>> {
+        let emqjs_invoke_import = take_export(&mut self.module, "emqjs_invoke_import")
+            .and_then(unwrap_enum!(ExportItem::Function))?;
+
+        let mut delete_imports = Vec::new();
+
+        let imports = self
+            .module
+            .imports
+            .iter_mut()
+            .filter_map(|i| match i.kind {
+                ImportKind::Function(func_id) if i.module == "env" => {
+                    Some((i.id(), func_id, i.name.as_str()))
+                }
+                _ => None,
+            })
+            .enumerate()
+            .map(|(table_index, (import_id, func_id, name))| {
+                let func_ty = self
+                    .module
+                    .types
+                    .get(self.module.funcs.get(func_id).ty())
+                    .clone();
                 let converted_func_ty = convert_func_type(&func_ty)?;
 
                 let replacement = ReplacementFunc {
@@ -106,22 +110,24 @@ fn main() -> anyhow::Result<()> {
                     func_id,
                 };
 
-                let mut new_func =
-                    FunctionBuilder::new(&mut module.types, func_ty.params(), func_ty.results());
+                let mut new_func = FunctionBuilder::new(
+                    &mut self.module.types,
+                    func_ty.params(),
+                    func_ty.results(),
+                );
                 let mut new_func_body = new_func.func_body();
                 let params = func_ty
                     .params()
                     .iter()
-                    .map(|&param_ty| module.locals.add(param_ty))
+                    .map(|&param_ty| self.module.locals.add(param_ty))
                     .collect::<Vec<_>>();
                 for (i, (&param, &param_ty)) in
                     params.iter().zip(&converted_func_ty.params).enumerate()
                 {
                     EmqjsSlot {
+                        space: self.emqjs_value_space,
                         builder: &mut new_func_body,
                         ty: param_ty,
-                        memory,
-                        emqjs_value_space_ptr,
                         index: i,
                     }
                     .make_store(|builder| {
@@ -132,47 +138,53 @@ fn main() -> anyhow::Result<()> {
                 new_func_body.call(emqjs_invoke_import);
                 if let Some(result_ty) = converted_func_ty.result {
                     EmqjsSlot {
+                        space: self.emqjs_value_space,
                         builder: &mut new_func_body,
                         ty: result_ty,
-                        memory,
-                        emqjs_value_space_ptr,
                         index: 0,
                     }
                     .make_load();
                 }
-                let new_func_id = new_func.finish(params, &mut module.funcs);
+                let new_func_id = new_func.finish(params, &mut self.module.funcs);
 
                 // workaround for LocalFunction not providing useful direct constructor:
                 // remove the function it inserted and put the body at the original index we want
                 let new_func_kind = std::mem::replace(
-                    &mut module.funcs.get_mut(new_func_id).kind,
+                    &mut self.module.funcs.get_mut(new_func_id).kind,
                     FunctionKind::Uninitialized(func_ty.id()),
                 );
-                module.funcs.delete(new_func_id);
+                self.module.funcs.delete(new_func_id);
 
                 delete_imports.push(replacement.import_id);
-                module.funcs.get_mut(replacement.func_id).kind = new_func_kind;
+                self.module.funcs.get_mut(replacement.func_id).kind = new_func_kind;
 
-                emqjs_module.imports.push(Func {
+                Ok(Func {
                     name: name.to_string(),
                     ty: converted_func_ty,
-                });
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
 
-                Ok(())
-            },
-        )?;
+        for import_id in delete_imports {
+            self.module.imports.delete(import_id);
+        }
 
-    for import_id in delete_imports {
-        module.imports.delete(import_id);
+        Ok(imports)
     }
 
-    // Add export trampoline
-    {
-        let mut emqjs_invoke_export = FunctionBuilder::new(&mut module.types, &[ValType::I32], &[]);
+    /// Create `emqjs_invoke_export` trampoline for stores params-results in `EMQJS_VALUE_SPACE` and invokes the underlying export function.
+    ///
+    /// Returns list of function descriptors for the JS side.
+    fn process_exports(&mut self) -> anyhow::Result<Vec<Func>> {
+        let mut emqjs_invoke_export =
+            FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
         let mut emqjs_invoke_export_body = emqjs_invoke_export.func_body();
 
         // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
-        let block_ids = module
+        let mut block_ids = Vec::new();
+
+        let exports = self
+            .module
             .exports
             .iter()
             .filter_map(|e| match e.item {
@@ -182,14 +194,14 @@ fn main() -> anyhow::Result<()> {
             .map(|(name, func_id)| {
                 let mut block = emqjs_invoke_export_body.dangling_instr_seq(None);
 
-                let func_ty = convert_func_type(module.types.get(module.funcs.get(func_id).ty()))?;
+                let func_ty =
+                    convert_func_type(self.module.types.get(self.module.funcs.get(func_id).ty()))?;
 
                 for (i, &param_ty) in func_ty.params.iter().enumerate() {
                     EmqjsSlot {
+                        space: self.emqjs_value_space,
                         builder: &mut block,
                         ty: param_ty,
-                        memory,
-                        emqjs_value_space_ptr,
                         index: i,
                     }
                     .make_load();
@@ -200,10 +212,9 @@ fn main() -> anyhow::Result<()> {
                 match &func_ty.result {
                     None => call_func(&mut block),
                     Some(result_ty) => EmqjsSlot {
+                        space: self.emqjs_value_space,
                         builder: &mut block,
                         ty: *result_ty,
-                        memory,
-                        emqjs_value_space_ptr,
                         index: 0,
                     }
                     .make_store(call_func),
@@ -211,14 +222,14 @@ fn main() -> anyhow::Result<()> {
 
                 block.return_();
 
-                emqjs_module.exports.push(Func {
+                block_ids.push(block.id());
+
+                Ok(Func {
                     name: name.to_string(),
                     ty: func_ty,
-                });
-
-                Ok(block.id())
+                })
             })
-            .collect::<anyhow::Result<Box<[_]>>>()?;
+            .collect::<anyhow::Result<_>>()?;
 
         // Create an innermost sequence where we'll put our `br_table` instruction.
         let innermost_block_id = emqjs_invoke_export_body.dangling_instr_seq(None).id();
@@ -241,53 +252,90 @@ fn main() -> anyhow::Result<()> {
         // `br_table` instruction.
         emqjs_invoke_export_body
             .instr_seq(innermost_block_id)
-            .br_table(block_ids, top_id);
+            .br_table(block_ids.into_boxed_slice(), top_id);
 
         // If we reached here, it means that id didn't match any of the blocks. Trap here.
         emqjs_invoke_export_body.unreachable();
 
-        let emqjs_invoke_export_id = emqjs_invoke_export.finish(vec![], &mut module.funcs);
+        let emqjs_invoke_export_id = emqjs_invoke_export.finish(vec![], &mut self.module.funcs);
 
-        module.exports.add(
+        self.module.exports.add(
             "emqjs_invoke_export",
             ExportItem::Function(emqjs_invoke_export_id),
         );
+
+        Ok(exports)
     }
 
-    let emqjs_encoded_module_ptr = take_pointer_global(&mut module, "EMQJS_ENCODED_MODULE")?;
-    module.data.add(
-        DataKind::Active(ActiveData {
-            memory,
-            location: ActiveDataLocation::Absolute(emqjs_encoded_module_ptr as u32),
-        }),
-        rkyv::to_bytes::<_, 1024>(&emqjs_module)?.into_vec(),
-    );
+    fn write_to_static_byte_array(
+        &mut self,
+        name: &'static str,
+        bytes: impl Into<Vec<u8>>,
+    ) -> anyhow::Result<()> {
+        let ptr = take_pointer_global(&mut self.module, name)?;
 
-    let emqjs_js_ptr = take_pointer_global(&mut module, "EMQJS_JS")?;
-    module.data.add(
-        DataKind::Active(ActiveData {
-            memory,
-            location: ActiveDataLocation::Absolute(emqjs_js_ptr as u32),
-        }),
-        std::fs::read("temp.js")?,
-    );
+        self.module.data.add(
+            DataKind::Active(ActiveData {
+                memory: self.memory,
+                location: ActiveDataLocation::Absolute(ptr as u32),
+            }),
+            bytes.into(),
+        );
 
-    module.emit_wasm_file("temp.out.wasm")?;
+        Ok(())
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let mut module = walrus::Module::from_file("temp.wasm")?;
+
+    // First memory (usually the only one) is the main one we want to target.
+    let memory = module.memories.iter().next().unwrap().id();
+
+    let emqjs_value_space = EmqjsValueSpace {
+        memory,
+        ptr: take_pointer_global(&mut module, "EMQJS_VALUE_SPACE")?,
+    };
+
+    let mut ctx = PreprocessCtx {
+        module,
+        emqjs_value_space,
+        memory,
+    };
+
+    let imports = ctx.process_imports()?;
+
+    // Add export trampoline
+    let exports = ctx.process_exports()?;
+
+    ctx.write_to_static_byte_array(
+        "EMQJS_ENCODED_MODULE",
+        rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?,
+    )?;
+
+    ctx.write_to_static_byte_array("EMQJS_JS", std::fs::read("temp.js")?)?;
+
+    ctx.module.emit_wasm_file("temp.out.wasm")?;
 
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct EmqjsValueSpace {
+    memory: MemoryId,
+    ptr: i32,
+}
+
 struct EmqjsSlot<'instr, 'module> {
+    space: EmqjsValueSpace,
     builder: &'instr mut InstrSeqBuilder<'module>,
     ty: ValueKind,
-    memory: MemoryId,
-    emqjs_value_space_ptr: i32,
     index: usize,
 }
 
 impl EmqjsSlot<'_, '_> {
     fn make_load(self) {
-        self.builder.i32_const(self.emqjs_value_space_ptr);
+        self.builder.i32_const(self.space.ptr);
         // note: the ABI could instead return f64 here and we would use reinterpret;
         // maybe something to consider in the future
         let load_kind = match self.ty {
@@ -297,7 +345,7 @@ impl EmqjsSlot<'_, '_> {
             ValueKind::F64 => LoadKind::F64,
         };
         self.builder.load(
-            self.memory,
+            self.space.memory,
             load_kind,
             MemArg {
                 align: self.ty.size() as u32,
@@ -307,7 +355,7 @@ impl EmqjsSlot<'_, '_> {
     }
 
     fn make_store(self, make_value: impl FnOnce(&mut InstrSeqBuilder)) {
-        self.builder.i32_const(self.emqjs_value_space_ptr);
+        self.builder.i32_const(self.space.ptr);
         make_value(self.builder);
         let store_kind = match self.ty {
             ValueKind::I32 => StoreKind::I32 { atomic: false },
@@ -316,7 +364,7 @@ impl EmqjsSlot<'_, '_> {
             ValueKind::F64 => StoreKind::F64,
         };
         self.builder.store(
-            self.memory,
+            self.space.memory,
             store_kind,
             MemArg {
                 align: self.ty.size() as u32,
