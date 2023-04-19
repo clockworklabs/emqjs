@@ -18,19 +18,25 @@ macro_rules! unwrap_enum {
     };
 }
 
-fn get_export<'m>(module: &'m Module, name: &'static str) -> anyhow::Result<&'m ExportItem> {
-    module
+fn take_export(module: &mut Module, name: &'static str) -> anyhow::Result<ExportItem> {
+    let export = module
         .exports
-        .iter()
+        .iter_mut()
         .find(|e| e.name == name)
-        .context(format!("Could not find `{name}` export"))
-        .map(|e| &e.item)
+        .context(format!("Could not find `{name}` export"))?;
+
+    let export_item = export.item;
+
+    let export_id = export.id();
+    module.exports.delete(export_id);
+
+    Ok(export_item)
 }
 
-fn get_pointer_global(module: &Module, name: &'static str) -> anyhow::Result<i32> {
-    get_export(module, name)
+fn take_pointer_global(module: &mut Module, name: &'static str) -> anyhow::Result<i32> {
+    take_export(module, name)
         .and_then(unwrap_enum!(ExportItem::Global))
-        .map(|g| &module.globals.get(*g).kind)
+        .map(|g| &module.globals.get(g).kind)
         .and_then(unwrap_enum!(GlobalKind::Local))
         .and_then(unwrap_enum!(InitExpr::Value))
         .and_then(unwrap_enum!(Value::I32))
@@ -66,16 +72,15 @@ fn convert_func_type(ty: &Type) -> anyhow::Result<FuncType> {
 fn main() -> anyhow::Result<()> {
     let mut module = walrus::Module::from_file("temp.wasm")?;
 
-    let emqjs_value_space_ptr = get_pointer_global(&module, "EMQJS_VALUE_SPACE")?;
+    let emqjs_value_space_ptr = take_pointer_global(&mut module, "EMQJS_VALUE_SPACE")?;
 
     let mut emqjs_module = emqjs_data_structures::Module::default();
 
     // First memory (usually the only one) is the main.
     let memory = module.memories.iter().next().unwrap().id();
 
-    let emqjs_invoke_import = get_export(&module, "emqjs_invoke_import")
-        .and_then(unwrap_enum!(ExportItem::Function))
-        .copied()?;
+    let emqjs_invoke_import = take_export(&mut module, "emqjs_invoke_import")
+        .and_then(unwrap_enum!(ExportItem::Function))?;
 
     // Replace env imports with trampolines.
     let mut delete_imports = Vec::new();
@@ -249,21 +254,20 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
+    let emqjs_encoded_module_ptr = take_pointer_global(&mut module, "EMQJS_ENCODED_MODULE")?;
     module.data.add(
         DataKind::Active(ActiveData {
             memory,
-            location: ActiveDataLocation::Absolute(get_pointer_global(
-                &module,
-                "EMQJS_ENCODED_MODULE",
-            )? as u32),
+            location: ActiveDataLocation::Absolute(emqjs_encoded_module_ptr as u32),
         }),
         rkyv::to_bytes::<_, 1024>(&emqjs_module)?.into_vec(),
     );
 
+    let emqjs_js_ptr = take_pointer_global(&mut module, "EMQJS_JS")?;
     module.data.add(
         DataKind::Active(ActiveData {
             memory,
-            location: ActiveDataLocation::Absolute(get_pointer_global(&module, "EMQJS_JS")? as u32),
+            location: ActiveDataLocation::Absolute(emqjs_js_ptr as u32),
         }),
         std::fs::read("temp.js")?,
     );
