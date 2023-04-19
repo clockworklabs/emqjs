@@ -12,7 +12,7 @@ pub enum ValueKind {
     F64,
 }
 
-#[derive(Archive, Serialize)]
+#[derive(Clone, Archive, Serialize)]
 pub struct FuncType {
     pub params: Vec<ValueKind>,
     pub result: Option<ValueKind>,
@@ -28,8 +28,9 @@ pub struct Func {
 pub struct Module {
     pub imports: Vec<Func>,
     pub exports: Vec<Func>,
+    pub table: Vec<Option<FuncType>>,
 }
 
 pub const EMQJS_JS_LEN: usize = 1_048_576;
-pub const EMQJS_ENCODED_MODULE_LEN: usize = 10_240;
+pub const EMQJS_ENCODED_MODULE_LEN: usize = 102_400;
 pub const EMQJS_VALUE_SPACE_LEN: usize = 1_024;

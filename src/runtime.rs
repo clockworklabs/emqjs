@@ -112,7 +112,9 @@ mod web_assembly {
         _module: i32,
         imports: Object<'js>,
     ) -> rquickjs::Result<InstantiationResultPromiseLike> {
-        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
+        let (exports, table) = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
+        exports.set("memory", Memory)?;
+        exports.set("table", Table::new(ctx, table))?;
         Ok(InstantiationResultPromiseLike {
             result: InstantiationResult {
                 instance: Instance {
@@ -145,6 +147,33 @@ mod web_assembly {
             }
         }
     }
+
+    #[quickjs(has_refs)]
+    #[derive(HasRefs)]
+    pub struct Table {
+        #[quickjs(has_refs)]
+        pub(crate) funcs: Vec<Option<rquickjs::Persistent<Function<'static>>>>,
+    }
+
+    impl Table {
+        pub(crate) fn new<'js>(ctx: Ctx<'js>, funcs: Vec<Option<Function<'js>>>) -> Self {
+            Self {
+                funcs: funcs
+                    .into_iter()
+                    .map(|func| Some(rquickjs::Persistent::save(ctx, func?)))
+                    .collect(),
+            }
+        }
+
+        #[quickjs(get)]
+        pub fn length(&self) -> usize {
+            self.funcs.len()
+        }
+
+        pub fn get(&self, index: usize) -> Option<rquickjs::Persistent<Function<'static>>> {
+            self.funcs[index].clone()
+        }
+    }
 }
 
 #[bind(object)]
@@ -152,17 +181,15 @@ mod web_assembly {
 mod emscripten {
     use super::*;
 
-    #[quickjs(rename = "wasmBinary")]
-    pub const WASM: i32 = 42;
-
     #[quickjs(rename = "instantiateWasm")]
     pub fn instantiate_wasm<'js>(
         ctx: Ctx<'js>,
         imports: Object<'js>,
         callback: Function,
     ) -> rquickjs::Result<()> {
-        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
+        let (exports, table) = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
         exports.set("memory", web_assembly::Memory)?;
+        exports.set("table", web_assembly::Table::new(ctx, table))?;
         let instance = web_assembly::Instance {
             exports: rquickjs::Persistent::save(ctx, exports),
         };

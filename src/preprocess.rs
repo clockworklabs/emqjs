@@ -107,7 +107,7 @@ impl PreprocessCtx {
                 }
                 _ => None,
             })
-            .filter(|&(_, _, name)| name != "emqjs_invoke_export")
+            .filter(|&(_, _, name)| name != "emqjs_invoke_export" && name != "emqjs_invoke_table")
             .enumerate()
             .map(|(table_index, (import_id, func_id, name))| {
                 println!("Convert import {name}");
@@ -323,7 +323,7 @@ impl PreprocessCtx {
     ) -> anyhow::Result<()> {
         let bytes = bytes.into();
 
-        anyhow::ensure!(bytes.len() <= max_len, "byte array too long");
+        anyhow::ensure!(bytes.len() <= max_len, "Data for array {name} is too long");
 
         let ptr = take_pointer_global(&mut self.module, name)?;
 
@@ -336,6 +336,169 @@ impl PreprocessCtx {
         );
 
         Ok(())
+    }
+
+    fn process_table(&mut self) -> anyhow::Result<Vec<Option<FuncType>>> {
+        // We're interested in first and hopefully only table.
+        let table = self
+            .module
+            .tables
+            .iter()
+            .next()
+            .context("Could not find table")?;
+
+        anyhow::ensure!(
+            table.element_ty == ValType::Funcref,
+            "Only function table is supported"
+        );
+
+        anyhow::ensure!(
+            Some(table.initial) == table.maximum,
+            "Resizable tables are not supported"
+        );
+
+        let mut types = vec![None; table.initial as usize];
+
+        let simple_func_type = self.module.types.add(&[], &[]);
+        let table_id = table.id();
+
+        for &elem_id in &table.elem_segments {
+            let elems = self.module.elements.get(elem_id);
+
+            let offset = match elems.kind {
+                ElementKind::Active {
+                    offset: InitExpr::Value(Value::I32(offset)),
+                    ..
+                } => offset as usize,
+                kind => anyhow::bail!("Unsupported element kind: {:?}", kind),
+            };
+
+            elems
+                .members
+                .iter()
+                .zip(&mut types[offset..])
+                .filter_map(|(&func_id, type_dst)| Some((func_id?, type_dst)))
+                .try_for_each(|(func_id, type_dst)| -> anyhow::Result<_> {
+                    let func = self.module.funcs.get(func_id);
+                    let func_ty = self.module.types.get(func.ty());
+                    let converted_ty = convert_func_type(func_ty)?;
+                    *type_dst = Some(converted_ty);
+                    Ok(())
+                })?;
+        }
+
+        let mut emqjs_invoke_table =
+            FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
+        let mut emqjs_invoke_table_body = emqjs_invoke_table.func_body();
+
+        // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
+        let block_ids = types
+            .iter()
+            .enumerate()
+            .map(|(i, func_ty)| {
+                let mut block = emqjs_invoke_table_body.dangling_instr_seq(None);
+
+                let func_ty = match func_ty {
+                    Some(func_ty) => func_ty,
+                    None => {
+                        // This is a hole in the table. Trap here.
+                        block.unreachable();
+                        return Ok(block.id());
+                    }
+                };
+
+                anyhow::ensure!(
+                    func_ty.params.len() <= EMQJS_VALUE_SPACE_LEN,
+                    "Too many params"
+                );
+                for (i, &param_ty) in func_ty.params.iter().enumerate() {
+                    EmqjsSlot {
+                        space: self.emqjs_value_space,
+                        builder: &mut block,
+                        ty: param_ty,
+                        index: i,
+                    }
+                    .make_load();
+                }
+                let call_func = |block: &mut InstrSeqBuilder| {
+                    block.call_indirect(simple_func_type, table_id);
+                };
+                match &func_ty.result {
+                    None => call_func(&mut block),
+                    Some(result_ty) => EmqjsSlot {
+                        space: self.emqjs_value_space,
+                        builder: &mut block,
+                        ty: *result_ty,
+                        index: 0,
+                    }
+                    .make_store(call_func),
+                }
+
+                block.return_();
+
+                Ok(block.id())
+            })
+            .collect::<anyhow::Result<Box<[_]>>>()?;
+
+        // Create an innermost sequence where we'll put our `br_table` instruction.
+        let innermost_block_id = emqjs_invoke_table_body.dangling_instr_seq(None).id();
+
+        // Build up the block tree, starting from the innermost one (that has `br_table`) and
+        // wrapping into blocks that are its destinations.
+        let mut inner_block_id = innermost_block_id;
+        for &block_id in block_ids.iter().rev() {
+            // Add each block_id as an actual Block instruction to its parent block.
+            emqjs_invoke_table_body.instr_seq(block_id).instr(Block {
+                seq: inner_block_id,
+            });
+            inner_block_id = block_id;
+        }
+
+        // Outermost body (function itself) is the default destination for the `br_table`.
+        let top_id = emqjs_invoke_table_body.id();
+
+        // Now that we processed all block_ids, we can consume them by adding to the innermost block's
+        // `br_table` instruction.
+        emqjs_invoke_table_body
+            .instr_seq(innermost_block_id)
+            .br_table(block_ids, top_id);
+
+        // If we reached here, it means that id didn't match any of the blocks. Trap here.
+        emqjs_invoke_table_body.unreachable();
+
+        let new_func_id = emqjs_invoke_table.finish(vec![], &mut self.module.funcs);
+
+        // Find an import to `emqjs_invoke_table` - we'll want to replace it.
+        let func_id = {
+            let import_id = self
+                .module
+                .imports
+                .find("env", "emqjs_invoke_table")
+                .context("Could not find import for `env.emqjs_invoke_table`")?;
+
+            // Get its function id and delete the import.
+            let func_id = match &self.module.imports.get(import_id).kind {
+                ImportKind::Function(func_id) => *func_id,
+                _ => anyhow::bail!("`env.emqjs_invoke_table` is imported as non-function"),
+            };
+
+            self.module.imports.delete(import_id);
+
+            func_id
+        };
+
+        // workaround for LocalFunction not providing useful direct constructor:
+        // remove the function it inserted and put the body at the original index we want
+        let new_func = self.module.funcs.get_mut(new_func_id);
+        let new_func_type_id = new_func.ty();
+        let new_func_kind = std::mem::replace(
+            &mut new_func.kind,
+            FunctionKind::Uninitialized(new_func_type_id),
+        );
+        self.module.funcs.get_mut(func_id).kind = new_func_kind;
+        self.module.funcs.delete(new_func_id);
+
+        Ok(types)
     }
 }
 
@@ -414,10 +577,15 @@ fn main() -> anyhow::Result<()> {
     // We don't want an import to `env.emqjs_invoke_export` to be treated like any other import.
     let imports = ctx.process_imports()?;
     let exports = ctx.process_exports()?;
+    let table = ctx.process_table()?;
 
     ctx.write_to_static_byte_array(
         "EMQJS_ENCODED_MODULE",
-        rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?,
+        rkyv::to_bytes::<_, 1024>(&EmqjsModule {
+            imports,
+            exports,
+            table,
+        })?,
         EMQJS_ENCODED_MODULE_LEN,
     )?;
 
