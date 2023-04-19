@@ -111,7 +111,7 @@ mod web_assembly {
 
     pub fn instantiate<'js>(
         ctx: Ctx<'js>,
-        _module: &other::Module,
+        _module: i32,
         imports: Object<'js>,
     ) -> rquickjs::Result<InstantiationResultPromiseLike> {
         let exports = imports::provide_imports(ctx, imports.get("env")?)?;
@@ -126,18 +126,10 @@ mod web_assembly {
 }
 
 #[bind(object)]
-#[quickjs(bare)]
-mod other {
-    use super::*;
-
-    #[derive(PartialEq)]
-    pub struct Module;
-
-    impl Module {
-        // We only need a single instance of this.
-        #[quickjs(rename = "wasm")]
-        pub const WASM: Self = Self;
-    }
+#[quickjs(rename = "Module")]
+mod emscripten {
+    #[quickjs(rename = "wasm")]
+    pub const WASM: i32 = 42;
 }
 
 pub static CONTEXT: OnceCell<Context> = OnceCell::new();
@@ -153,12 +145,14 @@ fn main() -> anyhow::Result<()> {
             context.with(|ctx| -> rquickjs::Result<_> {
                 ctx.globals().init_def::<Console>()?;
                 ctx.globals().init_def::<WebAssembly>()?;
+                ctx.globals().init_def::<Emscripten>()?;
                 Ok(())
             })?;
             Ok(context)
         })?
         .with(|ctx| -> rquickjs::Result<()> {
-            ctx.eval(&EMQJS_JS[..EMQJS_JS.iter().position(|b| *b == 0).unwrap_or(0)])?;
+            // ctx.eval(&EMQJS_JS[..EMQJS_JS.iter().position(|b| *b == 0).unwrap_or(0)])?;
+            ctx.eval(std::fs::read("temp.js")?)?;
             Ok(())
         })?;
     Ok(())
