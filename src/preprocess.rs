@@ -1,6 +1,6 @@
 use anyhow::Context;
 use emqjs_data_structures::{Func, FuncType, ValueKind};
-use walrus::ir::{LoadKind, MemArg, StoreKind, Value};
+use walrus::ir::{Block, LoadKind, MemArg, StoreKind, Value};
 use walrus::*;
 
 struct ReplacementFunc {
@@ -158,9 +158,9 @@ fn main() -> anyhow::Result<()> {
     {
         let mut emqjs_invoke_export = FunctionBuilder::new(&mut module.types, &[ValType::I32], &[]);
         let mut emqjs_invoke_export_body = emqjs_invoke_export.func_body();
-        emqjs_invoke_export_body.local_get(module.locals.add(ValType::I32));
 
-        let blocks = module
+        // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
+        let block_ids = module
             .exports
             .iter()
             .filter_map(|e| match e.item {
@@ -168,14 +168,14 @@ fn main() -> anyhow::Result<()> {
                 _ => None,
             })
             .map(|(name, func_id)| {
+                let mut block = emqjs_invoke_export_body.dangling_instr_seq(None);
+
                 let func_ty = module.types.get(module.funcs.get(func_id).ty());
 
                 emqjs_module.exports.push(Func {
                     name: name.to_string(),
                     ty: convert_func_type(func_ty)?,
                 });
-
-                let mut block = emqjs_invoke_export_body.dangling_instr_seq(None);
 
                 for (i, &param_ty) in func_ty.params().iter().enumerate() {
                     EmqjsSlot {
@@ -205,13 +205,37 @@ fn main() -> anyhow::Result<()> {
                     _ => anyhow::bail!("Multi-value functions are not supported"),
                 }
 
+                block.return_();
+
                 Ok(block.id())
             })
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<anyhow::Result<Box<[_]>>>()?;
 
-        let default_block_id = emqjs_invoke_export_body.dangling_instr_seq(None).id();
+        // Create an innermost sequence where we'll put our `br_table` instruction.
+        let innermost_block_id = emqjs_invoke_export_body.dangling_instr_seq(None).id();
 
-        emqjs_invoke_export_body.br_table(blocks, default_block_id);
+        // Build up the block tree, starting from the innermost one (that has `br_table`) and
+        // wrapping into blocks that are its destinations.
+        let mut inner_block_id = innermost_block_id;
+        for &block_id in block_ids.iter().rev() {
+            // Add each block_id as an actual Block instruction to its parent block.
+            emqjs_invoke_export_body.instr_seq(block_id).instr(Block {
+                seq: inner_block_id,
+            });
+            inner_block_id = block_id;
+        }
+
+        // Outermost body (function itself) is the default destination for the `br_table`.
+        let top_id = emqjs_invoke_export_body.id();
+
+        // Now that we processed all block_ids, we can consume them by adding to the innermost block's
+        // `br_table` instruction.
+        emqjs_invoke_export_body
+            .instr_seq(innermost_block_id)
+            .br_table(block_ids, top_id);
+
+        // If we reached here, it means that id didn't match any of the blocks. Trap here.
+        emqjs_invoke_export_body.unreachable();
 
         let emqjs_invoke_export_id = emqjs_invoke_export.finish(vec![], &mut module.funcs);
 
@@ -224,9 +248,10 @@ fn main() -> anyhow::Result<()> {
     module.data.add(
         DataKind::Active(ActiveData {
             memory,
-            location: ActiveDataLocation::Absolute(
-                get_pointer_global(&module, "EMQJS_IMPORTS")? as u32
-            ),
+            location: ActiveDataLocation::Absolute(get_pointer_global(
+                &module,
+                "EMQJS_ENCODED_MODULE",
+            )? as u32),
         }),
         rkyv::to_bytes::<_, 1024>(&emqjs_module)?.into_vec(),
     );
