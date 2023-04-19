@@ -257,12 +257,37 @@ impl PreprocessCtx {
         // If we reached here, it means that id didn't match any of the blocks. Trap here.
         emqjs_invoke_export_body.unreachable();
 
-        let emqjs_invoke_export_id = emqjs_invoke_export.finish(vec![], &mut self.module.funcs);
+        let new_func_id = emqjs_invoke_export.finish(vec![], &mut self.module.funcs);
 
-        self.module.exports.add(
-            "emqjs_invoke_export",
-            ExportItem::Function(emqjs_invoke_export_id),
+        // Find an import to `emqjs_invoke_export` - we'll want to replace it.
+        let func_id = {
+            let import_id = self
+                .module
+                .imports
+                .find("env", "emqjs_invoke_export")
+                .context("Could not find import for `env.emqjs_invoke_export`")?;
+
+            // Get its function id and delete the import.
+            let func_id = match &self.module.imports.get(import_id).kind {
+                ImportKind::Function(func_id) => *func_id,
+                _ => anyhow::bail!("`env.emqjs_invoke_export` is imported as non-function"),
+            };
+
+            self.module.imports.delete(import_id);
+
+            func_id
+        };
+
+        // workaround for LocalFunction not providing useful direct constructor:
+        // remove the function it inserted and put the body at the original index we want
+        let new_func = self.module.funcs.get_mut(new_func_id);
+        let new_func_type_id = new_func.ty();
+        let new_func_kind = std::mem::replace(
+            &mut new_func.kind,
+            FunctionKind::Uninitialized(new_func_type_id),
         );
+        self.module.funcs.get_mut(func_id).kind = new_func_kind;
+        self.module.funcs.delete(new_func_id);
 
         Ok(exports)
     }
@@ -284,40 +309,6 @@ impl PreprocessCtx {
 
         Ok(())
     }
-}
-
-fn main() -> anyhow::Result<()> {
-    let mut module = walrus::Module::from_file("temp.wasm")?;
-
-    // First memory (usually the only one) is the main one we want to target.
-    let memory = module.memories.iter().next().unwrap().id();
-
-    let emqjs_value_space = EmqjsValueSpace {
-        memory,
-        ptr: take_pointer_global(&mut module, "EMQJS_VALUE_SPACE")?,
-    };
-
-    let mut ctx = PreprocessCtx {
-        module,
-        emqjs_value_space,
-        memory,
-    };
-
-    let imports = ctx.process_imports()?;
-
-    // Add export trampoline
-    let exports = ctx.process_exports()?;
-
-    ctx.write_to_static_byte_array(
-        "EMQJS_ENCODED_MODULE",
-        rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?,
-    )?;
-
-    ctx.write_to_static_byte_array("EMQJS_JS", std::fs::read("temp.js")?)?;
-
-    ctx.module.emit_wasm_file("temp.out.wasm")?;
-
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -372,4 +363,39 @@ impl EmqjsSlot<'_, '_> {
             },
         );
     }
+}
+
+fn main() -> anyhow::Result<()> {
+    let mut module = walrus::Module::from_file("temp.wasm")?;
+
+    // First memory (usually the only one) is the main one we want to target.
+    let memory = module.memories.iter().next().unwrap().id();
+
+    let emqjs_value_space = EmqjsValueSpace {
+        memory,
+        ptr: take_pointer_global(&mut module, "EMQJS_VALUE_SPACE")?,
+    };
+
+    let mut ctx = PreprocessCtx {
+        module,
+        emqjs_value_space,
+        memory,
+    };
+
+    // Make sure to process exports first:
+    // We don't want an import to `env.emqjs_invoke_export` to be treated like any other import.
+    let exports = ctx.process_exports()?;
+
+    let imports = ctx.process_imports()?;
+
+    ctx.write_to_static_byte_array(
+        "EMQJS_ENCODED_MODULE",
+        rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?,
+    )?;
+
+    ctx.write_to_static_byte_array("EMQJS_JS", std::fs::read("temp.js")?)?;
+
+    ctx.module.emit_wasm_file("temp.out.wasm")?;
+
+    Ok(())
 }
