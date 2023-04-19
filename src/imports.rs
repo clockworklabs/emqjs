@@ -1,4 +1,4 @@
-use crate::CONTEXT;
+use crate::{Volatile, CONTEXT};
 use anyhow::Context;
 use emqjs_data_structures::{Module, ValueKind};
 use rkyv::Archive;
@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 /// encoded Vec<ImportRequest>
 #[no_mangle]
-static EMQJS_ENCODED_MODULE: [u8; 10240] = [0; 10240];
+static EMQJS_ENCODED_MODULE: Volatile<[u8; 10240]> = Volatile::new([0; 10240]);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -20,7 +20,7 @@ union Value {
 }
 
 #[no_mangle]
-static mut EMQJS_VALUE_SPACE: [Value; 1024] = [Value { i64: 0 }; 1024];
+static mut EMQJS_VALUE_SPACE: Volatile<[Value; 1024]> = Volatile::new([Value { i64: 0 }; 1024]);
 
 struct WasmCtx {
     module: &'static <Module as Archive>::Archived,

@@ -7,6 +7,30 @@ use rquickjs::{bind, Context, Ctx, Function, HasRefs, IntoJs, Object, Rest, Runt
 use std::collections::HashMap;
 use std::sync::Arc;
 
+struct Volatile<T> {
+    data: T,
+}
+
+impl<T> Volatile<T> {
+    pub const fn new(data: T) -> Self {
+        Self { data }
+    }
+}
+
+impl<T> std::ops::Deref for Volatile<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::ptr::read_volatile(&&self.data) }
+    }
+}
+
+impl<T> std::ops::DerefMut for Volatile<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::ptr::read_volatile(&&mut self.data) }
+    }
+}
+
 #[bind(object)]
 mod console {
     use super::*;
@@ -119,7 +143,7 @@ mod other {
 pub static CONTEXT: OnceCell<Context> = OnceCell::new();
 
 #[no_mangle]
-static EMQJS_JS: [u8; 1_048_576] = [0; 1_048_576];
+static EMQJS_JS: Volatile<[u8; 1_048_576]> = Volatile::new([0; 1_048_576]);
 
 fn main() -> anyhow::Result<()> {
     CONTEXT
