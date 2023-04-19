@@ -133,6 +133,8 @@ mod web_assembly {
                 let available_memory = std::arch::wasm32::memory_size::<0>() * 64 * 1024;
                 let handle = rquickjs::qjs::JS_NewArrayBuffer(
                     ctx.as_ptr(),
+                    // Yup, giving it a "slice" of the whole memory from 0-pointer to the end.
+                    // What could possibly go wrong? 😅
                     std::ptr::null_mut(),
                     available_memory as u32,
                     None,
