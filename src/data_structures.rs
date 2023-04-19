@@ -29,3 +29,7 @@ pub struct Module {
     pub imports: Vec<Func>,
     pub exports: Vec<Func>,
 }
+
+pub const EMQJS_JS_LEN: usize = 1_048_576;
+pub const EMQJS_ENCODED_MODULE_LEN: usize = 10_240;
+pub const EMQJS_VALUE_SPACE_LEN: usize = 1_024;

@@ -1,6 +1,7 @@
 mod data_structures;
 mod runtime_imports;
 
+use data_structures::EMQJS_JS_LEN;
 use once_cell::sync::OnceCell;
 use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Rest, Runtime, Value};
 
@@ -96,7 +97,7 @@ mod web_assembly {
     #[derive(HasRefs, Clone)]
     pub struct Instance {
         #[quickjs(has_refs)]
-        exports: rquickjs::Persistent<rquickjs::Object<'static>>,
+        pub(crate) exports: rquickjs::Persistent<rquickjs::Object<'static>>,
     }
 
     impl Instance {
@@ -120,19 +121,57 @@ mod web_assembly {
             },
         })
     }
+
+    #[quickjs(cloneable)]
+    #[derive(Clone, Copy)]
+    pub struct Memory;
+
+    impl Memory {
+        #[quickjs(get)]
+        pub fn buffer<'js>(self, ctx: Ctx<'js>) -> Value<'js> {
+            unsafe {
+                let available_memory = std::arch::wasm32::memory_size::<0>() * 64 * 1024;
+                let handle = rquickjs::qjs::JS_NewArrayBuffer(
+                    ctx.as_ptr(),
+                    std::ptr::null_mut(),
+                    available_memory as u32,
+                    None,
+                    std::ptr::null_mut(),
+                    0,
+                );
+                Value::from_js_value(ctx, handle)
+            }
+        }
+    }
 }
 
 #[bind(object)]
 #[quickjs(rename = "Module")]
 mod emscripten {
-    #[quickjs(rename = "wasm")]
+    use super::*;
+
+    #[quickjs(rename = "wasmBinary")]
     pub const WASM: i32 = 42;
+
+    #[quickjs(rename = "instantiateWasm")]
+    pub fn instantiate_wasm<'js>(
+        ctx: Ctx<'js>,
+        imports: Object<'js>,
+        callback: Function,
+    ) -> rquickjs::Result<()> {
+        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
+        exports.set("memory", web_assembly::Memory)?;
+        let instance = web_assembly::Instance {
+            exports: rquickjs::Persistent::save(ctx, exports),
+        };
+        callback.call((instance,))
+    }
 }
 
 pub static CONTEXT: OnceCell<Context> = OnceCell::new();
 
 #[no_mangle]
-static EMQJS_JS: Volatile<[u8; 1_048_576]> = Volatile::new([0; 1_048_576]);
+static EMQJS_JS: Volatile<[u8; EMQJS_JS_LEN]> = Volatile::new([0; EMQJS_JS_LEN]);
 
 fn start() -> anyhow::Result<()> {
     CONTEXT
@@ -155,6 +194,6 @@ fn start() -> anyhow::Result<()> {
 }
 
 #[no_mangle]
-pub fn _start() {
+pub fn emqjs_start() {
     start().unwrap();
 }

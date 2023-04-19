@@ -310,7 +310,7 @@ dependencies = [
 [[package]]
 name = "rquickjs"
 version = "0.1.7"
-source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#9c069b721ff95b071a83c209b6ecf9ac91f6e903"
+source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#29c5454fa0a8989b5251c90ea61244bc637cfaaa"
 dependencies = [
  "rquickjs-core",
  "rquickjs-macro",
@@ -319,7 +319,7 @@ dependencies = [
 [[package]]
 name = "rquickjs-core"
 version = "0.1.7"
-source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#9c069b721ff95b071a83c209b6ecf9ac91f6e903"
+source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#29c5454fa0a8989b5251c90ea61244bc637cfaaa"
 dependencies = [
  "relative-path",
  "rquickjs-sys",
@@ -328,7 +328,7 @@ dependencies = [
 [[package]]
 name = "rquickjs-macro"
 version = "0.1.7"
-source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#9c069b721ff95b071a83c209b6ecf9ac91f6e903"
+source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#29c5454fa0a8989b5251c90ea61244bc637cfaaa"
 dependencies = [
  "darling",
  "fnv",
@@ -345,7 +345,7 @@ dependencies = [
 [[package]]
 name = "rquickjs-sys"
 version = "0.1.7"
-source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#9c069b721ff95b071a83c209b6ecf9ac91f6e903"
+source = "git+https://github.com/RReverser/rquickjs?branch=arraybuffer-view#29c5454fa0a8989b5251c90ea61244bc637cfaaa"
 dependencies = [
  "cc",
 ]

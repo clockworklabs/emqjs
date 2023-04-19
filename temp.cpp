@@ -11,8 +11,17 @@ void foobar() {
   }
 }
 
+extern "C" void emqjs_start();
+
+static int already_started = 0;
+
 EMSCRIPTEN_KEEPALIVE
-void _start() {
+int main() {
+  if (!already_started) {
+    already_started = 1;
+    emqjs_start();
+    return 0;
+  }
   printf("Hello, world!");
   foobar();
 }

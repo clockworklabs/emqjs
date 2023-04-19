@@ -1,4 +1,4 @@
-use crate::data_structures::{Module, ValueKind};
+use crate::data_structures::{Module, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_VALUE_SPACE_LEN};
 use crate::{Volatile, CONTEXT};
 use rkyv::Archive;
 use rquickjs::{Ctx, FromJs};
@@ -7,7 +7,8 @@ use std::sync::Mutex;
 
 /// encoded Vec<ImportRequest>
 #[no_mangle]
-static EMQJS_ENCODED_MODULE: Volatile<[u8; 10240]> = Volatile::new([0; 10240]);
+static EMQJS_ENCODED_MODULE: Volatile<[u8; EMQJS_ENCODED_MODULE_LEN]> =
+    Volatile::new([0; EMQJS_ENCODED_MODULE_LEN]);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -19,7 +20,8 @@ union Value {
 }
 
 #[no_mangle]
-static mut EMQJS_VALUE_SPACE: Volatile<[Value; 1024]> = Volatile::new([Value { i64: 0 }; 1024]);
+static mut EMQJS_VALUE_SPACE: Volatile<[Value; EMQJS_VALUE_SPACE_LEN]> =
+    Volatile::new([Value { i64: 0 }; EMQJS_VALUE_SPACE_LEN]);
 
 struct WasmCtx {
     module: &'static <Module as Archive>::Archived,
@@ -121,7 +123,7 @@ fn from_js<'js>(
 }
 
 #[no_mangle]
-extern "C" fn emqjs_invoke_import(index: usize) {
+pub extern "C" fn emqjs_invoke_import(index: usize) {
     let imports_ctx_lock = IMPORTS_CTX.lock().unwrap();
     let imports_ctx = imports_ctx_lock
         .as_ref()

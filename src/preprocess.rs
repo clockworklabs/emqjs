@@ -1,7 +1,10 @@
 mod data_structures;
 
 use anyhow::Context;
-use data_structures::{Func, FuncType, Module as EmqjsModule, ValueKind};
+use data_structures::{
+    Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_JS_LEN,
+    EMQJS_VALUE_SPACE_LEN,
+};
 use walrus::ir::{Block, LoadKind, MemArg, StoreKind, Value};
 use walrus::*;
 
@@ -104,8 +107,11 @@ impl PreprocessCtx {
                 }
                 _ => None,
             })
+            .filter(|&(_, _, name)| name != "emqjs_invoke_export")
             .enumerate()
             .map(|(table_index, (import_id, func_id, name))| {
+                println!("Convert import {name}");
+
                 let func_ty = self
                     .module
                     .types
@@ -130,6 +136,7 @@ impl PreprocessCtx {
                     .iter()
                     .map(|&param_ty| self.module.locals.add(param_ty))
                     .collect::<Vec<_>>();
+                anyhow::ensure!(params.len() <= EMQJS_VALUE_SPACE_LEN, "Too many params");
                 for (i, (&param, &param_ty)) in
                     params.iter().zip(&converted_func_ty.params).enumerate()
                 {
@@ -200,12 +207,19 @@ impl PreprocessCtx {
                 ExportItem::Function(func_id) => Some((e.name.as_str(), func_id)),
                 _ => None,
             })
+            .filter(|&(name, _)| name != "emqjs_invoke_import" && name != "_start")
             .map(|(name, func_id)| {
+                println!("Converting export {name}");
+
                 let mut block = emqjs_invoke_export_body.dangling_instr_seq(None);
 
                 let func_ty =
                     convert_func_type(self.module.types.get(self.module.funcs.get(func_id).ty()))?;
 
+                anyhow::ensure!(
+                    func_ty.params.len() <= EMQJS_VALUE_SPACE_LEN,
+                    "Too many params"
+                );
                 for (i, &param_ty) in func_ty.params.iter().enumerate() {
                     EmqjsSlot {
                         space: self.emqjs_value_space,
@@ -305,7 +319,12 @@ impl PreprocessCtx {
         &mut self,
         name: &'static str,
         bytes: impl Into<Vec<u8>>,
+        max_len: usize,
     ) -> anyhow::Result<()> {
+        let bytes = bytes.into();
+
+        anyhow::ensure!(bytes.len() <= max_len, "byte array too long");
+
         let ptr = take_pointer_global(&mut self.module, name)?;
 
         self.module.data.add(
@@ -313,7 +332,7 @@ impl PreprocessCtx {
                 memory: self.memory,
                 location: ActiveDataLocation::Absolute(ptr as u32),
             }),
-            bytes.into(),
+            bytes,
         );
 
         Ok(())
@@ -393,16 +412,16 @@ fn main() -> anyhow::Result<()> {
 
     // Make sure to process exports first:
     // We don't want an import to `env.emqjs_invoke_export` to be treated like any other import.
-    let exports = ctx.process_exports()?;
-
     let imports = ctx.process_imports()?;
+    let exports = ctx.process_exports()?;
 
     ctx.write_to_static_byte_array(
         "EMQJS_ENCODED_MODULE",
         rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?,
+        EMQJS_ENCODED_MODULE_LEN,
     )?;
 
-    ctx.write_to_static_byte_array("EMQJS_JS", std::fs::read("temp.js")?)?;
+    ctx.write_to_static_byte_array("EMQJS_JS", std::fs::read("temp.js")?, EMQJS_JS_LEN)?;
 
     ctx.module.emit_wasm_file("temp.out.wasm")?;
 
