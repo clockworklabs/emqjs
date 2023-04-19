@@ -1,7 +1,5 @@
-mod data_structures;
-
 use anyhow::Context;
-use data_structures::{Func, FuncType, Module as EmqjsModule, ValueKind};
+use emqjs_data_structures::{Func, FuncType, Module as EmqjsModule, ValueKind};
 use walrus::ir::{Block, LoadKind, MemArg, StoreKind, Value};
 use walrus::*;
 
@@ -44,13 +42,6 @@ fn convert_func_type(ty: &Type) -> anyhow::Result<FuncType> {
             _ => anyhow::bail!("Multi-value results are not supported"),
         },
     })
-}
-
-fn alignment(ty: ValueKind) -> u32 {
-    match ty {
-        ValueKind::I32 | ValueKind::F32 => 4,
-        ValueKind::I64 | ValueKind::F64 => 8,
-    }
 }
 
 struct PreprocessCtx {
@@ -348,7 +339,7 @@ impl EmqjsSlot<'_, '_> {
             self.space.memory,
             load_kind,
             MemArg {
-                align: alignment(self.ty),
+                align: self.ty.size() as u32,
                 offset: self.index as u32 * 8,
             },
         );
@@ -367,7 +358,7 @@ impl EmqjsSlot<'_, '_> {
             self.space.memory,
             store_kind,
             MemArg {
-                align: alignment(self.ty),
+                align: self.ty.size() as u32,
                 offset: self.index as u32 * 8,
             },
         );
@@ -394,6 +385,8 @@ fn main() -> anyhow::Result<()> {
     // Make sure to process exports first:
     // We don't want an import to `env.emqjs_invoke_export` to be treated like any other import.
     let exports = ctx.process_exports()?;
+
+    println!("{:#?}", exports);
 
     let imports = ctx.process_imports()?;
 

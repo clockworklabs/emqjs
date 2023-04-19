@@ -1,8 +1,7 @@
+use crate::data_structures::{Module, ValueKind};
 use crate::{Volatile, CONTEXT};
-use anyhow::Context;
-use emqjs_data_structures::{Module, ValueKind};
 use rkyv::Archive;
-use rquickjs::{Ctx, FromJs, IteratorJs};
+use rquickjs::{Ctx, FromJs};
 use rquickjs::{IntoJs, Rest};
 use std::sync::Mutex;
 

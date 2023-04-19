@@ -1,11 +1,8 @@
-#![allow(unused_imports)]
-
-mod imports;
+mod data_structures;
+mod runtime_imports;
 
 use once_cell::sync::OnceCell;
-use rquickjs::{bind, Context, Ctx, Function, HasRefs, IntoJs, Object, Rest, Runtime, Value};
-use std::collections::HashMap;
-use std::sync::Arc;
+use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Rest, Runtime, Value};
 
 struct Volatile<T> {
     data: T,
@@ -114,7 +111,7 @@ mod web_assembly {
         _module: i32,
         imports: Object<'js>,
     ) -> rquickjs::Result<InstantiationResultPromiseLike> {
-        let exports = imports::provide_imports(ctx, imports.get("env")?)?;
+        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
         Ok(InstantiationResultPromiseLike {
             result: InstantiationResult {
                 instance: Instance {
@@ -137,7 +134,7 @@ pub static CONTEXT: OnceCell<Context> = OnceCell::new();
 #[no_mangle]
 static EMQJS_JS: Volatile<[u8; 1_048_576]> = Volatile::new([0; 1_048_576]);
 
-fn main() -> anyhow::Result<()> {
+fn start() -> anyhow::Result<()> {
     CONTEXT
         .get_or_try_init(|| -> rquickjs::Result<_> {
             let runtime = Runtime::new()?;
@@ -156,4 +153,9 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         })?;
     Ok(())
+}
+
+#[no_mangle]
+fn emqjs_start() {
+    start().unwrap();
 }

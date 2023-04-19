@@ -12,17 +12,14 @@ rkyv = { version = "0.7.41", features = ["archive_le"] }
 rquickjs = { version = "0.1.7", features = ["macro", "parallel", "dump-objects"] }
 walrus = "0.19.0"
 
-[lib]
-name = "emqjs_data_structures"
-path = "src/lib.rs"
-
-[[bin]]
-name = "emqjs_runtime"
-path = "src/main.rs"
-
 [[bin]]
 name = "emqjs_preprocess"
 path = "src/preprocess.rs"
+
+[lib]
+name = "emqjs_runtime"
+path = "src/runtime.rs"
+crate-type = ["staticlib"]
 
 [patch.crates-io]
 rquickjs = { git = "https://github.com/RReverser/rquickjs", branch = "arraybuffer-view" }
