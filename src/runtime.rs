@@ -148,14 +148,13 @@ fn start() -> anyhow::Result<()> {
             Ok(context)
         })?
         .with(|ctx| -> rquickjs::Result<()> {
-            // ctx.eval(&EMQJS_JS[..EMQJS_JS.iter().position(|b| *b == 0).unwrap_or(0)])?;
-            ctx.eval(std::fs::read("temp.js")?)?;
+            ctx.eval(&EMQJS_JS[..EMQJS_JS.iter().position(|b| *b == 0).unwrap_or(0)])?;
             Ok(())
         })?;
     Ok(())
 }
 
 #[no_mangle]
-fn emqjs_start() {
+pub fn _start() {
     start().unwrap();
 }
