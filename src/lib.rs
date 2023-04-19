@@ -11,6 +11,15 @@ pub enum ValueKind {
     F64,
 }
 
+impl ValueKind {
+    pub const fn size(self) -> usize {
+        match self {
+            ValueKind::I32 | ValueKind::F32 => 4,
+            ValueKind::I64 | ValueKind::F64 => 8,
+        }
+    }
+}
+
 #[derive(Archive, Serialize)]
 pub struct FuncType {
     pub params: Vec<ValueKind>,

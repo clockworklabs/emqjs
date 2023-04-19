@@ -70,7 +70,17 @@ fn main() -> anyhow::Result<()> {
 
     let mut emqjs_module = emqjs_data_structures::Module::default();
 
-    let replacements = module
+    // First memory (usually the only one) is the main.
+    let memory = module.memories.iter().next().unwrap().id();
+
+    let emqjs_invoke_import = get_export(&module, "emqjs_invoke_import")
+        .and_then(unwrap_enum!(ExportItem::Function))
+        .copied()?;
+
+    // Replace env imports with trampolines.
+    let mut delete_imports = Vec::new();
+
+    module
         .imports
         .iter_mut()
         .filter_map(|i| match i.kind {
@@ -80,78 +90,75 @@ fn main() -> anyhow::Result<()> {
             _ => None,
         })
         .enumerate()
-        .map(|(table_index, (import_id, func_id, name))| {
-            let func_ty = module.types.get(module.funcs.get(func_id).ty());
+        .try_for_each(
+            |(table_index, (import_id, func_id, name))| -> anyhow::Result<()> {
+                let func_ty = module.types.get(module.funcs.get(func_id).ty()).clone();
+                let converted_func_ty = convert_func_type(&func_ty)?;
 
-            emqjs_module.imports.push(Func {
-                name: name.to_string(),
-                ty: convert_func_type(func_ty)?,
-            });
+                let replacement = ReplacementFunc {
+                    table_index: table_index as i32,
+                    import_id,
+                    func_id,
+                };
 
-            Ok(ReplacementFunc {
-                table_index: table_index as i32,
-                import_id,
-                func_id,
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+                let mut new_func =
+                    FunctionBuilder::new(&mut module.types, func_ty.params(), func_ty.results());
+                let mut new_func_body = new_func.func_body();
+                let params = func_ty
+                    .params()
+                    .iter()
+                    .map(|&param_ty| module.locals.add(param_ty))
+                    .collect::<Vec<_>>();
+                for (i, (&param, &param_ty)) in
+                    params.iter().zip(&converted_func_ty.params).enumerate()
+                {
+                    EmqjsSlot {
+                        builder: &mut new_func_body,
+                        ty: param_ty,
+                        memory,
+                        emqjs_value_space_ptr,
+                        index: i,
+                    }
+                    .make_store(|builder| {
+                        builder.local_get(param);
+                    });
+                }
+                new_func_body.i32_const(replacement.table_index);
+                new_func_body.call(emqjs_invoke_import);
+                if let Some(result_ty) = converted_func_ty.result {
+                    EmqjsSlot {
+                        builder: &mut new_func_body,
+                        ty: result_ty,
+                        memory,
+                        emqjs_value_space_ptr,
+                        index: 0,
+                    }
+                    .make_load();
+                }
+                let new_func_id = new_func.finish(params, &mut module.funcs);
 
-    // First memory (usually the only one) is the main.
-    let memory = module.memories.iter().next().unwrap().id();
+                // workaround for LocalFunction not providing useful direct constructor:
+                // remove the function it inserted and put the body at the original index we want
+                let new_func_kind = std::mem::replace(
+                    &mut module.funcs.get_mut(new_func_id).kind,
+                    FunctionKind::Uninitialized(func_ty.id()),
+                );
+                module.funcs.delete(new_func_id);
 
-    let emqjs_invoke_import = get_export(&module, "emqjs_invoke_import")
-        .and_then(unwrap_enum!(ExportItem::Function))
-        .copied()?;
+                delete_imports.push(replacement.import_id);
+                module.funcs.get_mut(replacement.func_id).kind = new_func_kind;
 
-    // Replace imports with trampolines
-    for replacement in &replacements {
-        let func_ty_id = module.funcs.get(replacement.func_id).ty();
-        let func_ty = module.types.get(func_ty_id).clone();
+                emqjs_module.imports.push(Func {
+                    name: name.to_string(),
+                    ty: converted_func_ty,
+                });
 
-        let mut new_func =
-            FunctionBuilder::new(&mut module.types, func_ty.params(), func_ty.results());
-        let mut new_func_body = new_func.func_body();
-        let params = func_ty
-            .params()
-            .iter()
-            .map(|&param_ty| module.locals.add(param_ty))
-            .collect::<Vec<_>>();
-        for (i, (&param, &param_ty)) in params.iter().zip(func_ty.params()).enumerate() {
-            EmqjsSlot {
-                builder: &mut new_func_body,
-                ty: param_ty,
-                memory,
-                emqjs_value_space_ptr,
-                index: i,
-            }
-            .make_store(|builder| {
-                builder.local_get(param);
-            })?;
-        }
-        new_func_body.i32_const(replacement.table_index);
-        new_func_body.call(emqjs_invoke_import);
-        for (i, &result_ty) in func_ty.results().iter().enumerate() {
-            EmqjsSlot {
-                builder: &mut new_func_body,
-                ty: result_ty,
-                memory,
-                emqjs_value_space_ptr,
-                index: i,
-            }
-            .make_load()?;
-        }
-        let new_func_id = new_func.finish(params, &mut module.funcs);
+                Ok(())
+            },
+        )?;
 
-        // workaround for LocalFunction not providing useful direct constructor:
-        // remove the function it inserted and put at the original index we want
-        let new_func_kind = std::mem::replace(
-            &mut module.funcs.get_mut(new_func_id).kind,
-            FunctionKind::Uninitialized(func_ty_id),
-        );
-        module.funcs.delete(new_func_id);
-
-        module.imports.delete(replacement.import_id);
-        module.funcs.get_mut(replacement.func_id).kind = new_func_kind;
+    for import_id in delete_imports {
+        module.imports.delete(import_id);
     }
 
     // Add export trampoline
@@ -170,14 +177,9 @@ fn main() -> anyhow::Result<()> {
             .map(|(name, func_id)| {
                 let mut block = emqjs_invoke_export_body.dangling_instr_seq(None);
 
-                let func_ty = module.types.get(module.funcs.get(func_id).ty());
+                let func_ty = convert_func_type(module.types.get(module.funcs.get(func_id).ty()))?;
 
-                emqjs_module.exports.push(Func {
-                    name: name.to_string(),
-                    ty: convert_func_type(func_ty)?,
-                });
-
-                for (i, &param_ty) in func_ty.params().iter().enumerate() {
+                for (i, &param_ty) in func_ty.params.iter().enumerate() {
                     EmqjsSlot {
                         builder: &mut block,
                         ty: param_ty,
@@ -185,27 +187,29 @@ fn main() -> anyhow::Result<()> {
                         emqjs_value_space_ptr,
                         index: i,
                     }
-                    .make_load()?;
+                    .make_load();
                 }
                 let call_func = |block: &mut InstrSeqBuilder| {
                     block.call(func_id);
                 };
-                match func_ty.results() {
-                    [] => call_func(&mut block),
-                    [result_ty] => {
-                        EmqjsSlot {
-                            builder: &mut block,
-                            ty: *result_ty,
-                            memory,
-                            emqjs_value_space_ptr,
-                            index: 0,
-                        }
-                        .make_store(call_func)?;
+                match &func_ty.result {
+                    None => call_func(&mut block),
+                    Some(result_ty) => EmqjsSlot {
+                        builder: &mut block,
+                        ty: *result_ty,
+                        memory,
+                        emqjs_value_space_ptr,
+                        index: 0,
                     }
-                    _ => anyhow::bail!("Multi-value functions are not supported"),
+                    .make_store(call_func),
                 }
 
                 block.return_();
+
+                emqjs_module.exports.push(Func {
+                    name: name.to_string(),
+                    ty: func_ty,
+                });
 
                 Ok(block.id())
             })
@@ -271,53 +275,49 @@ fn main() -> anyhow::Result<()> {
 
 struct EmqjsSlot<'instr, 'module> {
     builder: &'instr mut InstrSeqBuilder<'module>,
-    ty: ValType,
+    ty: ValueKind,
     memory: MemoryId,
     emqjs_value_space_ptr: i32,
     index: usize,
 }
 
 impl EmqjsSlot<'_, '_> {
-    fn make_load(self) -> anyhow::Result<()> {
+    fn make_load(self) {
         self.builder.i32_const(self.emqjs_value_space_ptr);
         // note: the ABI could instead return f64 here and we would use reinterpret;
         // maybe something to consider in the future
         let load_kind = match self.ty {
-            ValType::I32 => LoadKind::I32 { atomic: false },
-            ValType::I64 => LoadKind::I64 { atomic: false },
-            ValType::F32 => LoadKind::F32,
-            ValType::F64 => LoadKind::F64,
-            _ => anyhow::bail!("Unsupported value type {:?}", self.ty),
+            ValueKind::I32 => LoadKind::I32 { atomic: false },
+            ValueKind::I64 => LoadKind::I64 { atomic: false },
+            ValueKind::F32 => LoadKind::F32,
+            ValueKind::F64 => LoadKind::F64,
         };
         self.builder.load(
             self.memory,
             load_kind,
             MemArg {
-                align: 8,
+                align: self.ty.size() as u32,
                 offset: self.index as u32 * 8,
             },
         );
-        Ok(())
     }
 
-    fn make_store(self, make_value: impl FnOnce(&mut InstrSeqBuilder)) -> anyhow::Result<()> {
+    fn make_store(self, make_value: impl FnOnce(&mut InstrSeqBuilder)) {
         self.builder.i32_const(self.emqjs_value_space_ptr);
         make_value(self.builder);
         let store_kind = match self.ty {
-            ValType::I32 => StoreKind::I32 { atomic: false },
-            ValType::I64 => StoreKind::I64 { atomic: false },
-            ValType::F32 => StoreKind::F32,
-            ValType::F64 => StoreKind::F64,
-            _ => anyhow::bail!("Unsupported value type {:?}", self.ty),
+            ValueKind::I32 => StoreKind::I32 { atomic: false },
+            ValueKind::I64 => StoreKind::I64 { atomic: false },
+            ValueKind::F32 => StoreKind::F32,
+            ValueKind::F64 => StoreKind::F64,
         };
         self.builder.store(
             self.memory,
             store_kind,
             MemArg {
-                align: 8,
+                align: self.ty.size() as u32,
                 offset: self.index as u32 * 8,
             },
         );
-        Ok(())
     }
 }
