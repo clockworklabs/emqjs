@@ -238,26 +238,36 @@ impl PreprocessCtx {
         // wrapping into blocks that are its destinations.
         let mut inner_block_id = innermost_block_id;
         for &block_id in block_ids.iter().rev() {
-            // Add each block_id as an actual Block instruction to its parent block.
-            emqjs_invoke_export_body.instr_seq(block_id).instr(Block {
-                seq: inner_block_id,
-            });
+            // Add each block_id as an actual Block instruction as the first instruction in its parent block.
+            emqjs_invoke_export_body.instr_seq(block_id).instr_at(
+                0,
+                Block {
+                    seq: inner_block_id,
+                },
+            );
             inner_block_id = block_id;
         }
 
         // Outermost body (function itself) is the default destination for the `br_table`.
         let top_id = emqjs_invoke_export_body.id();
 
+        let param = self.module.locals.add(ValType::I32);
+
         // Now that we processed all block_ids, we can consume them by adding to the innermost block's
         // `br_table` instruction.
         emqjs_invoke_export_body
             .instr_seq(innermost_block_id)
+            .local_get(param)
             .br_table(block_ids.into_boxed_slice(), top_id);
 
+        // Add the outermost block to the body.
+        emqjs_invoke_export_body.instr(Block {
+            seq: inner_block_id,
+        });
         // If we reached here, it means that id didn't match any of the blocks. Trap here.
         emqjs_invoke_export_body.unreachable();
 
-        let new_func_id = emqjs_invoke_export.finish(vec![], &mut self.module.funcs);
+        let new_func_id = emqjs_invoke_export.finish(vec![param], &mut self.module.funcs);
 
         // Find an import to `emqjs_invoke_export` - we'll want to replace it.
         let import_id = self
@@ -415,26 +425,32 @@ impl PreprocessCtx {
         // wrapping into blocks that are its destinations.
         let mut inner_block_id = innermost_block_id;
         for &block_id in block_ids.iter().rev() {
-            // Add each block_id as an actual Block instruction to its parent block.
-            emqjs_invoke_table_body.instr_seq(block_id).instr(Block {
-                seq: inner_block_id,
-            });
+            // Add each block_id as an actual Block instruction as the first instruction in its parent block.
+            emqjs_invoke_table_body.instr_seq(block_id).instr_at(
+                0,
+                Block {
+                    seq: inner_block_id,
+                },
+            );
             inner_block_id = block_id;
         }
 
         // Outermost body (function itself) is the default destination for the `br_table`.
         let top_id = emqjs_invoke_table_body.id();
 
+        let param = self.module.locals.add(ValType::I32);
+
         // Now that we processed all block_ids, we can consume them by adding to the innermost block's
         // `br_table` instruction.
         emqjs_invoke_table_body
+            .local_get(param)
             .instr_seq(innermost_block_id)
             .br_table(block_ids, top_id);
 
         // If we reached here, it means that id didn't match any of the blocks. Trap here.
         emqjs_invoke_table_body.unreachable();
 
-        let new_func_id = emqjs_invoke_table.finish(vec![], &mut self.module.funcs);
+        let new_func_id = emqjs_invoke_table.finish(vec![param], &mut self.module.funcs);
 
         // Find an import to `emqjs_invoke_table` - we'll want to replace it.
         let import_id = self
