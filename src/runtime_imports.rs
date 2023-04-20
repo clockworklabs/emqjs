@@ -2,7 +2,7 @@ use crate::data_structures::{
     ArchivedExport, FuncType, Module, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_VALUE_SPACE_LEN,
 };
 use crate::web_assembly::{Memory, Table};
-use crate::{Volatile, CONTEXT};
+use crate::{with_active_ctx, Volatile};
 use rkyv::Archive;
 use rquickjs::{Ctx, FromJs};
 use rquickjs::{IntoJs, Rest};
@@ -70,7 +70,11 @@ impl WasmCtx {
                                 Some(ty) => ty,
                                 None => return Ok(None),
                             };
-                            wrap_export(ctx, ty, move || unsafe { emqjs_invoke_table(i) }).map(Some)
+                            wrap_export(ctx, ty, move || {
+                                println!("Invoking table {i}");
+                                unsafe { emqjs_invoke_table(i) }
+                            })
+                            .map(Some)
                         })
                         .collect::<rquickjs::Result<_>>()?;
 
@@ -100,10 +104,15 @@ fn wrap_export<'js>(
 
             invoke_callback();
 
-            ty.result
+            let result = ty
+                .result
                 .as_ref()
                 .map(|kind| into_js(ctx, *kind, unsafe { EMQJS_VALUE_SPACE[0] }))
-                .transpose()
+                .transpose();
+
+            println!("Got result {result:?}");
+
+            result
         },
     )
 }
@@ -154,33 +163,36 @@ fn from_js<'js>(
 
 #[no_mangle]
 pub extern "C" fn emqjs_invoke_import(index: usize) {
+    println!(
+        "Invoking import {index} (original name {name})",
+        name = IMPORTS_CTX.lock().unwrap().as_ref().unwrap().module.imports[index].name,
+        index = index
+    );
     let imports_ctx_lock = IMPORTS_CTX.lock().unwrap();
     let imports_ctx = imports_ctx_lock
         .as_ref()
         .expect("imports weren't provided yet");
     let ty = &imports_ctx.module.imports[index].ty;
     let func = &imports_ctx.imports[index];
-    CONTEXT
-        .get()
-        .expect("Context wasn't initialized yet")
-        .with(|ctx| -> rquickjs::Result<()> {
-            // todo: try to avoid this allocation
-            let args = ty
-                .params
-                .iter()
-                .zip(unsafe { EMQJS_VALUE_SPACE.iter() })
-                .map(|(ty, value)| into_js(ctx, *ty, *value))
-                .collect::<rquickjs::Result<Vec<_>>>()?;
-            let result = func.clone().restore(ctx)?.call((Rest(args),))?;
-            if let Some(&result_type) = ty.result.as_ref() {
-                let value = from_js(ctx, result_type, result)?;
-                unsafe {
-                    *EMQJS_VALUE_SPACE.get_unchecked_mut(0) = value;
-                }
+    with_active_ctx(|ctx| -> rquickjs::Result<()> {
+        println!("Active context: {ctx:?}", ctx = ctx.as_ptr());
+        // todo: try to avoid this allocation
+        let args = ty
+            .params
+            .iter()
+            .zip(unsafe { EMQJS_VALUE_SPACE.iter() })
+            .map(|(ty, value)| into_js(ctx, *ty, *value))
+            .collect::<rquickjs::Result<Vec<_>>>()?;
+        let result = func.clone().restore(ctx)?.call((Rest(args),))?;
+        if let Some(&result_type) = ty.result.as_ref() {
+            let value = from_js(ctx, result_type, result)?;
+            unsafe {
+                *EMQJS_VALUE_SPACE.get_unchecked_mut(0) = value;
             }
-            Ok(())
-        })
-        .unwrap()
+        }
+        Ok(())
+    })
+    .unwrap()
 }
 
 extern "C" {

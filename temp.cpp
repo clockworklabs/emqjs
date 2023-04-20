@@ -13,15 +13,17 @@ void foobar() {
 
 extern "C" void emqjs_start();
 
-static int already_started = 0;
+// When JS initializes, it will call back into `_start` again.
+// We need to keep track of that to make sure that we initialise JS on the first start, and invoke actual code on 2nd.
+bool already_started = false;
+
+EMSCRIPTEN_KEEPALIVE
+extern "C" void actual_start() {
+  printf("Hello, world!\n");
+  foobar();
+}
 
 EMSCRIPTEN_KEEPALIVE
 int main() {
-  if (!already_started) {
-    already_started = 1;
-    emqjs_start();
-    return 0;
-  }
-  printf("Hello, world!");
-  foobar();
+  emqjs_start();
 }
