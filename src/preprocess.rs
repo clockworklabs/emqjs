@@ -184,7 +184,7 @@ impl PreprocessCtx {
                 ExportItem::Function(func_id) => Some((e.name.as_str(), func_id)),
                 _ => None,
             })
-            .filter(|&(name, _)| name != "emqjs_invoke_import" && name != "_start")
+            .filter(|&(name, _)| name != "emqjs_invoke_import")
             .map(|(name, func_id)| {
                 println!("Converting export {name}");
 
