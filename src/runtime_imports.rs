@@ -1,9 +1,10 @@
 use crate::data_structures::{
-    FuncType, Module, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_VALUE_SPACE_LEN,
+    ArchivedExport, FuncType, Module, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_VALUE_SPACE_LEN,
 };
+use crate::web_assembly::{Memory, Table};
 use crate::{Volatile, CONTEXT};
 use rkyv::Archive;
-use rquickjs::{Ctx, FromJs, Function};
+use rquickjs::{Ctx, FromJs};
 use rquickjs::{IntoJs, Rest};
 use std::sync::Mutex;
 
@@ -34,7 +35,7 @@ impl WasmCtx {
     fn new<'js>(
         ctx: rquickjs::Ctx<'js>,
         imports: rquickjs::Object<'js>,
-    ) -> rquickjs::Result<(Self, rquickjs::Object<'js>, Vec<Option<Function<'js>>>)> {
+    ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
         let module = unsafe { rkyv::archived_root::<Module>(&EMQJS_ENCODED_MODULE[..]) };
 
         let imports = module
@@ -48,25 +49,34 @@ impl WasmCtx {
 
         let exports = rquickjs::Object::new(ctx)?;
 
-        module.exports.iter().enumerate().try_for_each(|(i, e)| {
-            let func = wrap_export(ctx, &e.ty, move || unsafe { emqjs_invoke_export(i) })?;
-            exports.set(e.name.as_str(), func)
-        })?;
-
-        let table = module
-            .table
+        module
+            .exports
             .iter()
             .enumerate()
-            .map(|(i, ty)| {
-                let ty = match ty.as_ref() {
-                    Some(ty) => ty,
-                    None => return Ok(None),
-                };
-                wrap_export(ctx, ty, move || unsafe { emqjs_invoke_table(i) }).map(Some)
-            })
-            .collect::<rquickjs::Result<_>>()?;
+            .try_for_each(|(i, e)| match e {
+                ArchivedExport::Func(e) => {
+                    let func = wrap_export(ctx, &e.ty, move || unsafe { emqjs_invoke_export(i) })?;
+                    exports.set(e.name.as_str(), func)
+                }
+                ArchivedExport::Table { name, types } => {
+                    let table = types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| {
+                            let ty = match ty.as_ref() {
+                                Some(ty) => ty,
+                                None => return Ok(None),
+                            };
+                            wrap_export(ctx, ty, move || unsafe { emqjs_invoke_table(i) }).map(Some)
+                        })
+                        .collect::<rquickjs::Result<_>>()?;
 
-        Ok((WasmCtx { module, imports }, exports, table))
+                    exports.set(name.as_str(), Table::new(ctx, table))
+                }
+                ArchivedExport::Memory { name } => exports.set(name.as_str(), Memory),
+            })?;
+
+        Ok((WasmCtx { module, imports }, exports))
     }
 }
 
@@ -101,10 +111,10 @@ static IMPORTS_CTX: Mutex<Option<WasmCtx>> = Mutex::new(None);
 pub fn provide_imports<'js>(
     ctx: rquickjs::Ctx<'js>,
     imports: rquickjs::Object<'js>,
-) -> rquickjs::Result<(rquickjs::Object<'js>, Vec<Option<rquickjs::Function<'js>>>)> {
-    let (wasm_ctx, exports, table) = WasmCtx::new(ctx, imports)?;
+) -> rquickjs::Result<rquickjs::Object<'js>> {
+    let (wasm_ctx, exports) = WasmCtx::new(ctx, imports)?;
     *IMPORTS_CTX.lock().unwrap() = Some(wasm_ctx);
-    Ok((exports, table))
+    Ok(exports)
 }
 
 fn into_js(ctx: Ctx, kind: ValueKind, value: Value) -> rquickjs::Result<rquickjs::Value<'_>> {

@@ -112,9 +112,7 @@ mod web_assembly {
         _module: i32,
         imports: Object<'js>,
     ) -> rquickjs::Result<InstantiationResultPromiseLike> {
-        let (exports, table) = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
-        exports.set("memory", Memory)?;
-        exports.set("table", Table::new(ctx, table))?;
+        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
         Ok(InstantiationResultPromiseLike {
             result: InstantiationResult {
                 instance: Instance {
@@ -187,9 +185,7 @@ mod emscripten {
         imports: Object<'js>,
         callback: Function,
     ) -> rquickjs::Result<()> {
-        let (exports, table) = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
-        exports.set("memory", web_assembly::Memory)?;
-        exports.set("table", web_assembly::Table::new(ctx, table))?;
+        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
         let instance = web_assembly::Instance {
             exports: rquickjs::Persistent::save(ctx, exports),
         };

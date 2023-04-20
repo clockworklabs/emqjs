@@ -24,11 +24,22 @@ pub struct Func {
     pub ty: FuncType,
 }
 
+#[derive(Archive, Serialize)]
+pub enum Export {
+    Func(Func),
+    Table {
+        name: String,
+        types: Vec<Option<FuncType>>,
+    },
+    Memory {
+        name: String,
+    },
+}
+
 #[derive(Default, Archive, Serialize)]
 pub struct Module {
     pub imports: Vec<Func>,
-    pub exports: Vec<Func>,
-    pub table: Vec<Option<FuncType>>,
+    pub exports: Vec<Export>,
 }
 
 pub const EMQJS_JS_LEN: usize = 1_048_576;

@@ -191,7 +191,7 @@ impl PreprocessCtx {
     /// Create `emqjs_invoke_export` trampoline for stores params-results in `EMQJS_VALUE_SPACE` and invokes the underlying export function.
     ///
     /// Returns list of function descriptors for the JS side.
-    fn process_exports(&mut self) -> anyhow::Result<Vec<Func>> {
+    fn process_func_exports(&mut self) -> anyhow::Result<Vec<Func>> {
         let mut emqjs_invoke_export =
             FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
         let mut emqjs_invoke_export_body = emqjs_invoke_export.func_body();
@@ -318,19 +318,23 @@ impl PreprocessCtx {
     fn write_to_static_byte_array(
         &mut self,
         name: &'static str,
+        offset: usize,
         bytes: impl Into<Vec<u8>>,
         max_len: usize,
     ) -> anyhow::Result<()> {
         let bytes = bytes.into();
 
-        anyhow::ensure!(bytes.len() <= max_len, "Data for array {name} is too long");
+        anyhow::ensure!(
+            offset + bytes.len() <= max_len,
+            "Data for array {name} is too long"
+        );
 
         let ptr = take_pointer_global(&mut self.module, name)?;
 
         self.module.data.add(
             DataKind::Active(ActiveData {
                 memory: self.memory,
-                location: ActiveDataLocation::Absolute(ptr as u32),
+                location: ActiveDataLocation::Absolute(ptr as u32 + offset as u32),
             }),
             bytes,
         );
@@ -358,6 +362,7 @@ impl PreprocessCtx {
         );
 
         let mut types = vec![None; table.initial as usize];
+        let mut dests = vec![None; table.initial as usize];
 
         let simple_func_type = self.module.types.add(&[], &[]);
         let table_id = table.id();
@@ -377,12 +382,14 @@ impl PreprocessCtx {
                 .members
                 .iter()
                 .zip(&mut types[offset..])
-                .filter_map(|(&func_id, type_dst)| Some((func_id?, type_dst)))
-                .try_for_each(|(func_id, type_dst)| -> anyhow::Result<_> {
+                .zip(&mut dests[offset..])
+                .filter_map(|((&func_id, type_dst), func_dst)| Some((func_id?, type_dst, func_dst)))
+                .try_for_each(|(func_id, type_dst, func_dst)| -> anyhow::Result<_> {
                     let func = self.module.funcs.get(func_id);
                     let func_ty = self.module.types.get(func.ty());
                     let converted_ty = convert_func_type(func_ty)?;
                     *type_dst = Some(converted_ty);
+                    *func_dst = Some(func_id);
                     Ok(())
                 })?;
         }
@@ -394,8 +401,8 @@ impl PreprocessCtx {
         // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
         let block_ids = types
             .iter()
-            .enumerate()
-            .map(|(i, func_ty)| {
+            .zip(&dests)
+            .map(|(func_ty, func_id)| {
                 let mut block = emqjs_invoke_table_body.dangling_instr_seq(None);
 
                 let func_ty = match func_ty {
@@ -421,7 +428,7 @@ impl PreprocessCtx {
                     .make_load();
                 }
                 let call_func = |block: &mut InstrSeqBuilder| {
-                    block.call_indirect(simple_func_type, table_id);
+                    block.call(func_id.expect("if func_ty is Some, func_id must be Some"));
                 };
                 match &func_ty.result {
                     None => call_func(&mut block),
@@ -573,23 +580,48 @@ fn main() -> anyhow::Result<()> {
         memory,
     };
 
-    // Make sure to process exports first:
-    // We don't want an import to `env.emqjs_invoke_export` to be treated like any other import.
     let imports = ctx.process_imports()?;
-    let exports = ctx.process_exports()?;
-    let table = ctx.process_table()?;
+
+    let func_exports = ctx.process_func_exports()?;
+    let mut exports = func_exports
+        .into_iter()
+        .map(data_structures::Export::Func)
+        .collect::<Vec<_>>();
+    let table_export = ctx
+        .module
+        .exports
+        .iter()
+        .find(|e| matches!(e.item, ExportItem::Table(_)));
+    if let Some(e) = table_export {
+        let name = e.name.to_owned();
+        ctx.module.exports.delete(e.id());
+        let types = ctx.process_table()?;
+        exports.push(data_structures::Export::Table { name, types });
+    }
+    let mem_export = ctx
+        .module
+        .exports
+        .iter()
+        .find(|e| matches!(e.item, ExportItem::Memory(_)));
+    // Note: memory export must not be deleted.
+    if let Some(e) = mem_export {
+        exports.push(data_structures::Export::Memory {
+            name: e.name.to_owned(),
+        });
+    }
+
+    let emqjs_encoded_module = rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?;
 
     ctx.write_to_static_byte_array(
         "EMQJS_ENCODED_MODULE",
-        rkyv::to_bytes::<_, 1024>(&EmqjsModule {
-            imports,
-            exports,
-            table,
-        })?,
+        // rkyv expects archived root to be at the end of the slice
+        // so we need to write it at the end of the static array given to us
+        EMQJS_ENCODED_MODULE_LEN - emqjs_encoded_module.len(),
+        emqjs_encoded_module,
         EMQJS_ENCODED_MODULE_LEN,
     )?;
 
-    ctx.write_to_static_byte_array("EMQJS_JS", std::fs::read("temp.js")?, EMQJS_JS_LEN)?;
+    ctx.write_to_static_byte_array("EMQJS_JS", 0, std::fs::read("temp.js")?, EMQJS_JS_LEN)?;
 
     ctx.module.emit_wasm_file("temp.out.wasm")?;
 
