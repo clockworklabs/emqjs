@@ -197,16 +197,16 @@ impl PreprocessCtx {
                     func_ty.params.len() <= EMQJS_VALUE_SPACE_LEN,
                     "Too many params"
                 );
-                for (i, &param_ty) in func_ty.params.iter().enumerate() {
-                    EmqjsSlot {
-                        space: self.emqjs_value_space,
-                        builder: &mut block,
-                        ty: param_ty,
-                        index: i,
-                    }
-                    .make_load();
-                }
                 let call_func = |block: &mut InstrSeqBuilder| {
+                    for (i, &param_ty) in func_ty.params.iter().enumerate() {
+                        EmqjsSlot {
+                            space: self.emqjs_value_space,
+                            builder: block,
+                            ty: param_ty,
+                            index: i,
+                        }
+                        .make_load();
+                    }
                     block.call(func_id);
                 };
                 match &func_ty.result {
@@ -389,16 +389,16 @@ impl PreprocessCtx {
                     func_ty.params.len() <= EMQJS_VALUE_SPACE_LEN,
                     "Too many params"
                 );
-                for (i, &param_ty) in func_ty.params.iter().enumerate() {
-                    EmqjsSlot {
-                        space: self.emqjs_value_space,
-                        builder: &mut block,
-                        ty: param_ty,
-                        index: i,
-                    }
-                    .make_load();
-                }
                 let call_func = |block: &mut InstrSeqBuilder| {
+                    for (i, &param_ty) in func_ty.params.iter().enumerate() {
+                        EmqjsSlot {
+                            space: self.emqjs_value_space,
+                            builder: block,
+                            ty: param_ty,
+                            index: i,
+                        }
+                        .make_load();
+                    }
                     block.call(func_id.expect("if func_ty is Some, func_id must be Some"));
                 };
                 match &func_ty.result {
@@ -540,7 +540,17 @@ impl EmqjsSlot<'_, '_> {
 
     fn make_store(self, make_value: impl FnOnce(&mut InstrSeqBuilder)) {
         self.builder.i32_const(self.space.ptr);
-        make_value(self.builder);
+        // wrap into block just for validation -
+        // otherwise it's easy to accidentally use the value from outside or leave something on stack
+        self.builder.block(
+            match self.ty {
+                ValueKind::I32 => ValType::I32,
+                ValueKind::I64 => ValType::I64,
+                ValueKind::F32 => ValType::F32,
+                ValueKind::F64 => ValType::F64,
+            },
+            make_value,
+        );
         let store_kind = match self.ty {
             ValueKind::I32 => StoreKind::I32 { atomic: false },
             ValueKind::I64 => StoreKind::I64 { atomic: false },
