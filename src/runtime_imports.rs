@@ -55,7 +55,10 @@ impl WasmCtx {
             .enumerate()
             .try_for_each(|(i, e)| match e {
                 ArchivedExport::Func(e) => {
-                    let func = wrap_export(ctx, &e.ty, move || unsafe { emqjs_invoke_export(i) })?;
+                    let func = wrap_export(ctx, &e.ty, move || {
+                        println!("Invoking export {i} (original name {name})", name = e.name);
+                        unsafe { emqjs_invoke_export(i) }
+                    })?;
                     exports.set(e.name.as_str(), func)
                 }
                 ArchivedExport::Table { name, types } => {

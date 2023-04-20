@@ -5,7 +5,7 @@ use data_structures::{
     Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_JS_LEN,
     EMQJS_VALUE_SPACE_LEN,
 };
-use walrus::ir::{dfs_pre_order_mut, Block, LoadKind, MemArg, StoreKind, Value, VisitorMut};
+use walrus::ir::{dfs_pre_order_mut, InstrSeqId, LoadKind, MemArg, StoreKind, Value, VisitorMut};
 use walrus::*;
 
 macro_rules! unwrap_enum {
@@ -28,6 +28,10 @@ fn convert_type(ty: ValType) -> anyhow::Result<ValueKind> {
 }
 
 fn convert_func_type(ty: &Type) -> anyhow::Result<FuncType> {
+    anyhow::ensure!(
+        ty.params().len() <= EMQJS_VALUE_SPACE_LEN,
+        "Too many params"
+    );
     Ok(FuncType {
         params: ty
             .params()
@@ -103,7 +107,7 @@ impl PreprocessCtx {
             .filter(|&(_, _, name)| name != "emqjs_invoke_export" && name != "emqjs_invoke_table")
             .enumerate()
             .map(|(table_index, (import_id, func_id, name))| {
-                println!("Convert import {name}");
+                println!("Converting import {name}");
 
                 let func_ty = self
                     .module
@@ -173,8 +177,7 @@ impl PreprocessCtx {
         emqjs_invoke_export.name("emqjs_invoke_export".to_owned());
         let mut emqjs_invoke_export_body = emqjs_invoke_export.func_body();
 
-        // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
-        let mut block_ids = Vec::new();
+        let mut export_func_ids = Vec::new();
 
         let exports = self
             .module
@@ -188,19 +191,25 @@ impl PreprocessCtx {
             .map(|(name, func_id)| {
                 println!("Converting export {name}");
 
-                let mut block = emqjs_invoke_export_body.dangling_instr_seq(None);
+                export_func_ids.push(func_id);
 
-                let func_ty =
-                    convert_func_type(self.module.types.get(self.module.funcs.get(func_id).ty()))?;
+                Ok(Func {
+                    name: name.to_owned(),
+                    ty: convert_func_type(
+                        self.module.types.get(self.module.funcs.get(func_id).ty()),
+                    )?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-                anyhow::ensure!(
-                    func_ty.params.len() <= EMQJS_VALUE_SPACE_LEN,
-                    "Too many params"
-                );
+        let space = self.emqjs_value_space;
+
+        let block_builders = exports.iter().zip(export_func_ids).map(|(func, func_id)| {
+            move |block: &mut InstrSeqBuilder| {
                 let call_func = |block: &mut InstrSeqBuilder| {
-                    for (i, &param_ty) in func_ty.params.iter().enumerate() {
+                    for (i, &param_ty) in func.ty.params.iter().enumerate() {
                         EmqjsSlot {
-                            space: self.emqjs_value_space,
+                            space,
                             builder: block,
                             ty: param_ty,
                             index: i,
@@ -209,11 +218,11 @@ impl PreprocessCtx {
                     }
                     block.call(func_id);
                 };
-                match &func_ty.result {
-                    None => call_func(&mut block),
+                match &func.ty.result {
+                    None => call_func(block),
                     Some(result_ty) => EmqjsSlot {
-                        space: self.emqjs_value_space,
-                        builder: &mut block,
+                        space,
+                        builder: block,
                         ty: *result_ty,
                         index: 0,
                     }
@@ -221,53 +230,19 @@ impl PreprocessCtx {
                 }
 
                 block.return_();
-
-                block_ids.push(block.id());
-
-                Ok(Func {
-                    name: name.to_string(),
-                    ty: func_ty,
-                })
-            })
-            .collect::<anyhow::Result<_>>()?;
-
-        // Create an innermost sequence where we'll put our `br_table` instruction.
-        let innermost_block_id = emqjs_invoke_export_body.dangling_instr_seq(None).id();
-
-        // Build up the block tree, starting from the innermost one (that has `br_table`) and
-        // wrapping into blocks that are its destinations.
-        let mut inner_block_id = innermost_block_id;
-        for &block_id in block_ids.iter().rev() {
-            // Add each block_id as an actual Block instruction as the first instruction in its parent block.
-            emqjs_invoke_export_body.instr_seq(block_id).instr_at(
-                0,
-                Block {
-                    seq: inner_block_id,
-                },
-            );
-            inner_block_id = block_id;
-        }
-
-        // Outermost body (function itself) is the default destination for the `br_table`.
-        let top_id = emqjs_invoke_export_body.id();
-
-        let param = self.module.locals.add(ValType::I32);
-
-        // Now that we processed all block_ids, we can consume them by adding to the innermost block's
-        // `br_table` instruction.
-        emqjs_invoke_export_body
-            .instr_seq(innermost_block_id)
-            .local_get(param)
-            .br_table(block_ids.into_boxed_slice(), top_id);
-
-        // Add the outermost block to the body.
-        emqjs_invoke_export_body.instr(Block {
-            seq: inner_block_id,
+            }
         });
-        // If we reached here, it means that id didn't match any of the blocks. Trap here.
-        emqjs_invoke_export_body.unreachable();
 
-        let new_func_id = emqjs_invoke_export.finish(vec![param], &mut self.module.funcs);
+        let discriminant = self.module.locals.add(ValType::I32);
+
+        Self::build_switch(
+            discriminant,
+            &mut emqjs_invoke_export_body,
+            Vec::new(),
+            block_builders,
+        );
+
+        let new_func_id = emqjs_invoke_export.finish(vec![discriminant], &mut self.module.funcs);
 
         // Find an import to `emqjs_invoke_export` - we'll want to replace it.
         let import_id = self
@@ -313,6 +288,30 @@ impl PreprocessCtx {
         );
 
         Ok(())
+    }
+
+    fn build_switch<F: FnOnce(&mut InstrSeqBuilder)>(
+        discriminant: LocalId,
+        parent: &mut InstrSeqBuilder,
+        mut block_ids: Vec<InstrSeqId>,
+        mut build_blocks: impl Iterator<Item = F>,
+    ) {
+        match build_blocks.next() {
+            Some(build_block) => {
+                parent.block(None, |nested| {
+                    block_ids.push(nested.id());
+                    Self::build_switch(discriminant, nested, block_ids, build_blocks);
+                });
+                build_block(parent);
+            }
+            None => {
+                parent.block(None, |nested| {
+                    nested.local_get(discriminant);
+                    nested.br_table(block_ids.into_boxed_slice(), nested.id());
+                });
+                parent.unreachable();
+            }
+        }
     }
 
     fn process_table(&mut self) -> anyhow::Result<Vec<Option<FuncType>>> {
@@ -367,32 +366,25 @@ impl PreprocessCtx {
         let mut emqjs_invoke_table =
             FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
         emqjs_invoke_table.name("emqjs_invoke_table".to_owned());
-        let mut emqjs_invoke_table_body = emqjs_invoke_table.func_body();
 
         // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
-        let block_ids = types
-            .iter()
-            .zip(&dests)
-            .map(|(func_ty, func_id)| {
-                let mut block = emqjs_invoke_table_body.dangling_instr_seq(None);
+        let space = self.emqjs_value_space;
 
+        let block_builders = types.iter().zip(&dests).map(|(func_ty, func_id)| {
+            move |block: &mut InstrSeqBuilder| {
                 let func_ty = match func_ty {
                     Some(func_ty) => func_ty,
                     None => {
                         // This is a hole in the table. Trap here.
                         block.unreachable();
-                        return Ok(block.id());
+                        return;
                     }
                 };
 
-                anyhow::ensure!(
-                    func_ty.params.len() <= EMQJS_VALUE_SPACE_LEN,
-                    "Too many params"
-                );
                 let call_func = |block: &mut InstrSeqBuilder| {
                     for (i, &param_ty) in func_ty.params.iter().enumerate() {
                         EmqjsSlot {
-                            space: self.emqjs_value_space,
+                            space,
                             builder: block,
                             ty: param_ty,
                             index: i,
@@ -402,10 +394,12 @@ impl PreprocessCtx {
                     block.call(func_id.expect("if func_ty is Some, func_id must be Some"));
                 };
                 match &func_ty.result {
-                    None => call_func(&mut block),
+                    None => {
+                        call_func(block);
+                    }
                     Some(result_ty) => EmqjsSlot {
-                        space: self.emqjs_value_space,
-                        builder: &mut block,
+                        space,
+                        builder: block,
                         ty: *result_ty,
                         index: 0,
                     }
@@ -413,44 +407,19 @@ impl PreprocessCtx {
                 }
 
                 block.return_();
+            }
+        });
 
-                Ok(block.id())
-            })
-            .collect::<anyhow::Result<Box<[_]>>>()?;
+        let discriminant = self.module.locals.add(ValType::I32);
 
-        // Create an innermost sequence where we'll put our `br_table` instruction.
-        let innermost_block_id = emqjs_invoke_table_body.dangling_instr_seq(None).id();
+        Self::build_switch(
+            discriminant,
+            &mut emqjs_invoke_table.func_body(),
+            Vec::new(),
+            block_builders,
+        );
 
-        // Build up the block tree, starting from the innermost one (that has `br_table`) and
-        // wrapping into blocks that are its destinations.
-        let mut inner_block_id = innermost_block_id;
-        for &block_id in block_ids.iter().rev() {
-            // Add each block_id as an actual Block instruction as the first instruction in its parent block.
-            emqjs_invoke_table_body.instr_seq(block_id).instr_at(
-                0,
-                Block {
-                    seq: inner_block_id,
-                },
-            );
-            inner_block_id = block_id;
-        }
-
-        // Outermost body (function itself) is the default destination for the `br_table`.
-        let top_id = emqjs_invoke_table_body.id();
-
-        let param = self.module.locals.add(ValType::I32);
-
-        // Now that we processed all block_ids, we can consume them by adding to the innermost block's
-        // `br_table` instruction.
-        emqjs_invoke_table_body
-            .local_get(param)
-            .instr_seq(innermost_block_id)
-            .br_table(block_ids, top_id);
-
-        // If we reached here, it means that id didn't match any of the blocks. Trap here.
-        emqjs_invoke_table_body.unreachable();
-
-        let new_func_id = emqjs_invoke_table.finish(vec![param], &mut self.module.funcs);
+        let new_func_id = emqjs_invoke_table.finish(vec![discriminant], &mut self.module.funcs);
 
         // Find an import to `emqjs_invoke_table` - we'll want to replace it.
         let import_id = self
