@@ -25,6 +25,7 @@ pub struct Func {
 }
 
 #[derive(Archive, Serialize)]
+#[allow(dead_code)]
 pub enum Export {
     Func(Func),
     Table {
