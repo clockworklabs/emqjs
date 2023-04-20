@@ -5,14 +5,8 @@ use data_structures::{
     Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_JS_LEN,
     EMQJS_VALUE_SPACE_LEN,
 };
-use walrus::ir::{Block, LoadKind, MemArg, StoreKind, Value};
+use walrus::ir::{dfs_pre_order_mut, Block, LoadKind, MemArg, StoreKind, Value, VisitorMut};
 use walrus::*;
-
-struct ReplacementFunc {
-    import_id: ImportId,
-    func_id: FunctionId,
-    table_index: i32,
-}
 
 macro_rules! unwrap_enum {
     ($path:path) => {
@@ -60,6 +54,7 @@ struct PreprocessCtx {
     module: Module,
     emqjs_value_space: EmqjsValueSpace,
     memory: MemoryId,
+    func_id_replacements: Vec<(ImportId, FunctionId, FunctionId)>,
 }
 
 fn take_export(module: &mut Module, name: &'static str) -> anyhow::Result<ExportItem> {
@@ -95,8 +90,6 @@ impl PreprocessCtx {
         let emqjs_invoke_import = take_export(&mut self.module, "emqjs_invoke_import")
             .and_then(unwrap_enum!(ExportItem::Function))?;
 
-        let mut delete_imports = Vec::new();
-
         let imports = self
             .module
             .imports
@@ -118,12 +111,6 @@ impl PreprocessCtx {
                     .get(self.module.funcs.get(func_id).ty())
                     .clone();
                 let converted_func_ty = convert_func_type(&func_ty)?;
-
-                let replacement = ReplacementFunc {
-                    table_index: table_index as i32,
-                    import_id,
-                    func_id,
-                };
 
                 let mut new_func = FunctionBuilder::new(
                     &mut self.module.types,
@@ -150,7 +137,7 @@ impl PreprocessCtx {
                         builder.local_get(param);
                     });
                 }
-                new_func_body.i32_const(replacement.table_index);
+                new_func_body.i32_const(table_index as i32);
                 new_func_body.call(emqjs_invoke_import);
                 if let Some(result_ty) = converted_func_ty.result {
                     EmqjsSlot {
@@ -163,16 +150,8 @@ impl PreprocessCtx {
                 }
                 let new_func_id = new_func.finish(params, &mut self.module.funcs);
 
-                // workaround for LocalFunction not providing useful direct constructor:
-                // remove the function it inserted and put the body at the original index we want
-                let new_func_kind = std::mem::replace(
-                    &mut self.module.funcs.get_mut(new_func_id).kind,
-                    FunctionKind::Uninitialized(func_ty.id()),
-                );
-                self.module.funcs.delete(new_func_id);
-
-                delete_imports.push(replacement.import_id);
-                self.module.funcs.get_mut(replacement.func_id).kind = new_func_kind;
+                self.func_id_replacements
+                    .push((import_id, func_id, new_func_id));
 
                 Ok(Func {
                     name: name.to_string(),
@@ -180,10 +159,6 @@ impl PreprocessCtx {
                 })
             })
             .collect::<anyhow::Result<_>>()?;
-
-        for import_id in delete_imports {
-            self.module.imports.delete(import_id);
-        }
 
         Ok(imports)
     }
@@ -283,34 +258,20 @@ impl PreprocessCtx {
         let new_func_id = emqjs_invoke_export.finish(vec![], &mut self.module.funcs);
 
         // Find an import to `emqjs_invoke_export` - we'll want to replace it.
-        let func_id = {
-            let import_id = self
-                .module
-                .imports
-                .find("env", "emqjs_invoke_export")
-                .context("Could not find import for `env.emqjs_invoke_export`")?;
+        let import_id = self
+            .module
+            .imports
+            .find("env", "emqjs_invoke_export")
+            .context("Could not find import for `env.emqjs_invoke_export`")?;
 
-            // Get its function id and delete the import.
-            let func_id = match &self.module.imports.get(import_id).kind {
-                ImportKind::Function(func_id) => *func_id,
-                _ => anyhow::bail!("`env.emqjs_invoke_export` is imported as non-function"),
-            };
-
-            self.module.imports.delete(import_id);
-
-            func_id
+        // Get its function id and delete the import.
+        let func_id = match &self.module.imports.get(import_id).kind {
+            ImportKind::Function(func_id) => *func_id,
+            _ => anyhow::bail!("`env.emqjs_invoke_export` is imported as non-function"),
         };
 
-        // workaround for LocalFunction not providing useful direct constructor:
-        // remove the function it inserted and put the body at the original index we want
-        let new_func = self.module.funcs.get_mut(new_func_id);
-        let new_func_type_id = new_func.ty();
-        let new_func_kind = std::mem::replace(
-            &mut new_func.kind,
-            FunctionKind::Uninitialized(new_func_type_id),
-        );
-        self.module.funcs.get_mut(func_id).kind = new_func_kind;
-        self.module.funcs.delete(new_func_id);
+        self.func_id_replacements
+            .push((import_id, func_id, new_func_id));
 
         Ok(exports)
     }
@@ -363,9 +324,6 @@ impl PreprocessCtx {
 
         let mut types = vec![None; table.initial as usize];
         let mut dests = vec![None; table.initial as usize];
-
-        let simple_func_type = self.module.types.add(&[], &[]);
-        let table_id = table.id();
 
         for &elem_id in &table.elem_segments {
             let elems = self.module.elements.get(elem_id);
@@ -476,36 +434,54 @@ impl PreprocessCtx {
         let new_func_id = emqjs_invoke_table.finish(vec![], &mut self.module.funcs);
 
         // Find an import to `emqjs_invoke_table` - we'll want to replace it.
-        let func_id = {
-            let import_id = self
-                .module
-                .imports
-                .find("env", "emqjs_invoke_table")
-                .context("Could not find import for `env.emqjs_invoke_table`")?;
+        let import_id = self
+            .module
+            .imports
+            .find("env", "emqjs_invoke_table")
+            .context("Could not find import for `env.emqjs_invoke_table`")?;
 
-            // Get its function id and delete the import.
-            let func_id = match &self.module.imports.get(import_id).kind {
-                ImportKind::Function(func_id) => *func_id,
-                _ => anyhow::bail!("`env.emqjs_invoke_table` is imported as non-function"),
-            };
-
-            self.module.imports.delete(import_id);
-
-            func_id
+        // Get its function id and delete the import.
+        let func_id = match &self.module.imports.get(import_id).kind {
+            ImportKind::Function(func_id) => *func_id,
+            _ => anyhow::bail!("`env.emqjs_invoke_table` is imported as non-function"),
         };
 
-        // workaround for LocalFunction not providing useful direct constructor:
-        // remove the function it inserted and put the body at the original index we want
-        let new_func = self.module.funcs.get_mut(new_func_id);
-        let new_func_type_id = new_func.ty();
-        let new_func_kind = std::mem::replace(
-            &mut new_func.kind,
-            FunctionKind::Uninitialized(new_func_type_id),
-        );
-        self.module.funcs.get_mut(func_id).kind = new_func_kind;
-        self.module.funcs.delete(new_func_id);
+        self.func_id_replacements
+            .push((import_id, func_id, new_func_id));
 
         Ok(types)
+    }
+
+    fn finish_replacements(&mut self) -> anyhow::Result<()> {
+        struct ReplacementVisitor<'a> {
+            replacements: &'a [(ImportId, FunctionId, FunctionId)],
+        }
+
+        impl VisitorMut for ReplacementVisitor<'_> {
+            fn visit_function_id_mut(&mut self, function: &mut walrus::FunctionId) {
+                for (_, old, new) in self.replacements {
+                    if *function == *old {
+                        *function = *new;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut visitor = ReplacementVisitor {
+            replacements: &self.func_id_replacements,
+        };
+
+        for (_, func) in self.module.funcs.iter_local_mut() {
+            dfs_pre_order_mut(&mut visitor, func, func.entry_block());
+        }
+
+        for &(import_id, from, _) in self.func_id_replacements.iter() {
+            self.module.imports.delete(import_id);
+            self.module.funcs.delete(from);
+        }
+
+        Ok(())
     }
 }
 
@@ -578,6 +554,7 @@ fn main() -> anyhow::Result<()> {
         module,
         emqjs_value_space,
         memory,
+        func_id_replacements: Vec::new(),
     };
 
     let imports = ctx.process_imports()?;
@@ -623,6 +600,7 @@ fn main() -> anyhow::Result<()> {
 
     ctx.write_to_static_byte_array("EMQJS_JS", 0, std::fs::read("temp.js")?, EMQJS_JS_LEN)?;
 
+    ctx.finish_replacements()?;
     ctx.module.emit_wasm_file("temp.out.wasm")?;
 
     Ok(())
