@@ -117,6 +117,7 @@ impl PreprocessCtx {
                     func_ty.params(),
                     func_ty.results(),
                 );
+                new_func.name(format!("emqjs_invoke_import:{name}"));
                 let mut new_func_body = new_func.func_body();
                 let params = func_ty
                     .params()
@@ -169,6 +170,7 @@ impl PreprocessCtx {
     fn process_func_exports(&mut self) -> anyhow::Result<Vec<Func>> {
         let mut emqjs_invoke_export =
             FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
+        emqjs_invoke_export.name("emqjs_invoke_export".to_owned());
         let mut emqjs_invoke_export_body = emqjs_invoke_export.func_body();
 
         // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
@@ -354,6 +356,7 @@ impl PreprocessCtx {
 
         let mut emqjs_invoke_table =
             FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
+        emqjs_invoke_table.name("emqjs_invoke_table".to_owned());
         let mut emqjs_invoke_table_body = emqjs_invoke_table.func_body();
 
         // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
