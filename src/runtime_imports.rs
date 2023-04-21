@@ -6,7 +6,7 @@ use crate::{with_active_ctx, Volatile};
 use rkyv::Archive;
 use rquickjs::{Ctx, FromJs};
 use rquickjs::{IntoJs, Rest};
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 /// encoded Vec<ImportRequest>
 #[no_mangle]
@@ -117,15 +117,22 @@ fn wrap_export<'js>(
     )
 }
 
-// ideally this would be OnceCell but ImportsCtx is !Send, so we need a full Mutex
-static IMPORTS_CTX: Mutex<Option<WasmCtx>> = Mutex::new(None);
+thread_local! {
+    // ideally this would be OnceCell but ImportsCtx is !Send, so we need a full Mutex
+    static IMPORTS_CTX: RefCell<Option<WasmCtx>> = RefCell::new(None);
+}
 
 pub fn provide_imports<'js>(
     ctx: rquickjs::Ctx<'js>,
     imports: rquickjs::Object<'js>,
 ) -> rquickjs::Result<rquickjs::Object<'js>> {
     let (wasm_ctx, exports) = WasmCtx::new(ctx, imports)?;
-    *IMPORTS_CTX.lock().unwrap() = Some(wasm_ctx);
+    IMPORTS_CTX.with(|imports_ctx| {
+        assert!(
+            imports_ctx.replace(Some(wasm_ctx)).is_none(),
+            "provide_imports called twice"
+        );
+    });
     Ok(exports)
 }
 
@@ -163,17 +170,13 @@ fn from_js<'js>(
 
 #[no_mangle]
 pub extern "C" fn emqjs_invoke_import(index: usize) {
-    println!(
-        "Invoking import {index} (original name {name})",
-        name = IMPORTS_CTX.lock().unwrap().as_ref().unwrap().module.imports[index].name,
-        index = index
-    );
-    let imports_ctx_lock = IMPORTS_CTX.lock().unwrap();
-    let imports_ctx = imports_ctx_lock
-        .as_ref()
-        .expect("imports weren't provided yet");
-    let ty = &imports_ctx.module.imports[index].ty;
-    let func = &imports_ctx.imports[index];
+    let (ty, func) = IMPORTS_CTX.with(|imports_ctx| {
+        let imports_ctx = imports_ctx.borrow();
+        let imports_ctx = imports_ctx.as_ref().expect("imports weren't provided yet");
+        let ty = &imports_ctx.module.imports[index].ty;
+        let func = imports_ctx.imports[index].clone();
+        (ty, func)
+    });
     with_active_ctx(|ctx| -> rquickjs::Result<()> {
         println!("Active context: {ctx:?}", ctx = ctx.as_ptr());
         // todo: try to avoid this allocation
