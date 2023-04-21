@@ -463,6 +463,12 @@ impl PreprocessCtx {
         for (_, func) in self.module.funcs.iter_local_mut() {
             dfs_pre_order_mut(&mut visitor, func, func.entry_block());
         }
+        self.module
+            .elements
+            .iter_mut()
+            .flat_map(|e| e.members.iter_mut())
+            .flatten()
+            .for_each(|f| visitor.visit_function_id_mut(f));
 
         for &(import_id, from, _) in self.func_id_replacements.iter() {
             self.module.imports.delete(import_id);
