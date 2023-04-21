@@ -598,6 +598,26 @@ fn main() -> anyhow::Result<()> {
 
     ctx.write_to_static_byte_array("EMQJS_JS", 0, std::fs::read("temp.js")?, EMQJS_JS_LEN)?;
 
+    // Original _start is preserved in the trampoline now.
+    // Replace the Wasm `_start` with `emqjs_start` export that starts the JS runtime instead.
+
+    let emqjs_start_export = ctx
+        .module
+        .exports
+        .iter()
+        .find(|e| e.name == "emqjs_start")
+        .context("Could not find `emqjs_start` export")?;
+
+    let emqjs_start_item = emqjs_start_export.item;
+    ctx.module.exports.delete(emqjs_start_export.id());
+
+    ctx.module
+        .exports
+        .iter_mut()
+        .find(|e| e.name == "_start")
+        .context("Could not find `_start` export")?
+        .item = emqjs_start_item;
+
     ctx.finish_replacements()?;
     ctx.module.emit_wasm_file("temp.out.wasm")?;
 
