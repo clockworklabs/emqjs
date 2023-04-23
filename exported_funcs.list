@@ -1,3 +1,6 @@
 __start
 _emqjs_invoke_import
 _emqjs_start
+_EMQJS_VALUE_SPACE
+_EMQJS_ENCODED_MODULE
+_EMQJS_JS
