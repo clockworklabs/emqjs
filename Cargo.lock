@@ -99,7 +99,6 @@ name = "emqjs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "once_cell",
  "rkyv",
  "rquickjs",
  "walrus",

@@ -2,7 +2,7 @@
 
 use rkyv::{Archive, Serialize};
 
-#[derive(Archive, Serialize, Clone, Copy)]
+#[derive(Debug, Archive, Serialize, Clone, Copy)]
 #[archive(as = "ValueKind")] // avoid creating separate representation anum for achiving
 #[allow(dead_code)] // Rust thinks those variants aren't constructed but they're by rkyv
 pub enum ValueKind {
@@ -12,19 +12,22 @@ pub enum ValueKind {
     F64,
 }
 
-#[derive(Clone, Archive, Serialize)]
+#[derive(Debug, Clone, Archive, Serialize)]
+#[archive_attr(derive(Debug))]
 pub struct FuncType {
     pub params: Vec<ValueKind>,
     pub result: Option<ValueKind>,
 }
 
-#[derive(Archive, Serialize)]
+#[derive(Debug, Archive, Serialize)]
+#[archive_attr(derive(Debug))]
 pub struct Func {
     pub name: String,
     pub ty: FuncType,
 }
 
-#[derive(Archive, Serialize)]
+#[derive(Debug, Archive, Serialize)]
+#[archive_attr(derive(Debug))]
 #[allow(dead_code)]
 pub enum Export {
     Func(Func),
@@ -37,7 +40,8 @@ pub enum Export {
     },
 }
 
-#[derive(Default, Archive, Serialize)]
+#[derive(Debug, Default, Archive, Serialize)]
+#[archive_attr(derive(Debug))]
 pub struct Module {
     pub imports: Vec<Func>,
     pub exports: Vec<Export>,

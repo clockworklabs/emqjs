@@ -38,6 +38,8 @@ impl WasmCtx {
     ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
         let module = unsafe { rkyv::archived_root::<Module>(&EMQJS_ENCODED_MODULE[..]) };
 
+        println!("{:#?}", module);
+
         let imports = module
             .imports
             .iter()
