@@ -3,10 +3,10 @@ use crate::data_structures::{
 };
 use crate::web_assembly::{Memory, Table};
 use crate::{with_active_ctx, Volatile};
+use once_cell::unsync::OnceCell;
 use rkyv::Archive;
 use rquickjs::{Ctx, FromJs};
 use rquickjs::{IntoJs, Rest};
-use std::cell::RefCell;
 
 /// encoded Vec<ImportRequest>
 #[no_mangle]
@@ -121,7 +121,7 @@ fn wrap_export<'js>(
 
 thread_local! {
     // ideally this would be OnceCell but ImportsCtx is !Send, so we need a full Mutex
-    static IMPORTS_CTX: RefCell<Option<WasmCtx>> = RefCell::new(None);
+    static IMPORTS_CTX: OnceCell<WasmCtx> = OnceCell::new();
 }
 
 pub fn provide_imports<'js>(
@@ -130,10 +130,9 @@ pub fn provide_imports<'js>(
 ) -> rquickjs::Result<rquickjs::Object<'js>> {
     let (wasm_ctx, exports) = WasmCtx::new(ctx, imports)?;
     IMPORTS_CTX.with(|imports_ctx| {
-        assert!(
-            imports_ctx.replace(Some(wasm_ctx)).is_none(),
-            "provide_imports called twice"
-        );
+        imports_ctx
+            .set(wasm_ctx)
+            .unwrap_or_else(|_| panic!("provide_imports was already called"))
     });
     Ok(exports)
 }
@@ -173,8 +172,7 @@ fn from_js<'js>(
 #[no_mangle]
 pub extern "C" fn emqjs_invoke_import(index: usize) {
     let (ty, func) = IMPORTS_CTX.with(|imports_ctx| {
-        let imports_ctx = imports_ctx.borrow();
-        let imports_ctx = imports_ctx.as_ref().expect("imports weren't provided yet");
+        let imports_ctx = imports_ctx.get().expect("imports weren't provided yet");
         let ty = &imports_ctx.module.imports[index].ty;
         let func = imports_ctx.imports[index].clone();
         (ty, func)
