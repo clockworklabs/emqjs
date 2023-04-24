@@ -43,6 +43,7 @@ pub struct Module {
     pub exports: Vec<Export>,
 }
 
-pub const EMQJS_JS_LEN: usize = 1_048_576;
-pub const EMQJS_ENCODED_MODULE_LEN: usize = 102_400;
-pub const EMQJS_VALUE_SPACE_LEN: usize = 1_024;
+pub const EMQJS_JS_LEN: usize = 1024 * 1024;
+pub const EMQJS_ENCODED_MODULE_LEN: usize = 1024 * 1024;
+// The maximum number of parameters to any function is 1000. (c) the spec
+pub const EMQJS_VALUE_SPACE_LEN: usize = 1000;

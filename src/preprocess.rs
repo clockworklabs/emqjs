@@ -5,6 +5,7 @@ use data_structures::{
     Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_JS_LEN,
     EMQJS_VALUE_SPACE_LEN,
 };
+use std::path::Path;
 use walrus::ir::{dfs_pre_order_mut, InstrSeqId, LoadKind, MemArg, StoreKind, Value, VisitorMut};
 use walrus::*;
 
@@ -543,8 +544,13 @@ impl EmqjsSlot<'_, '_> {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let mut module = walrus::Module::from_file("temp.wasm")?;
+fn threaded_main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    let input_wasm = args.next().context("No input wasm file provided")?;
+    let input_js = Path::new(&input_wasm).with_extension("js");
+    let output_wasm = args.next().context("No output wasm file provided")?;
+
+    let mut module = walrus::Module::from_file(input_wasm)?;
 
     // First memory (usually the only one) is the main one we want to target.
     let memory = module.memories.iter().next().unwrap().id();
@@ -597,12 +603,20 @@ fn main() -> anyhow::Result<()> {
         "EMQJS_ENCODED_MODULE",
         // rkyv expects archived root to be at the end of the slice
         // so we need to write it at the end of the static array given to us
-        EMQJS_ENCODED_MODULE_LEN - emqjs_encoded_module.len(),
+        EMQJS_ENCODED_MODULE_LEN
+            .checked_sub(emqjs_encoded_module.len())
+            .with_context(|| {
+                format!(
+                    "Encoded module is too big: {} bytes, won't fit into the allocated {} bytes",
+                    emqjs_encoded_module.len(),
+                    EMQJS_ENCODED_MODULE_LEN
+                )
+            })?,
         emqjs_encoded_module,
         EMQJS_ENCODED_MODULE_LEN,
     )?;
 
-    ctx.write_to_static_byte_array("EMQJS_JS", 0, std::fs::read("temp.js")?, EMQJS_JS_LEN)?;
+    ctx.write_to_static_byte_array("EMQJS_JS", 0, std::fs::read(input_js)?, EMQJS_JS_LEN)?;
 
     // Original _start is preserved in the trampoline now.
     // Replace the Wasm `_start` with `emqjs_start` export that starts the JS runtime instead.
@@ -625,7 +639,15 @@ fn main() -> anyhow::Result<()> {
         .item = emqjs_start_item;
 
     ctx.finish_replacements()?;
-    ctx.module.emit_wasm_file("temp.out.wasm")?;
+    ctx.module.emit_wasm_file(output_wasm)?;
 
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .stack_size(80 * 1024 * 1024)
+        .spawn(threaded_main)?
+        .join()
+        .unwrap()
 }

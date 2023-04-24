@@ -5,6 +5,11 @@ use data_structures::EMQJS_JS_LEN;
 use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Rest, Runtime, Value};
 use std::cell::Cell;
 
+// Workaround for https://github.com/emscripten-core/emscripten/issues/19236.
+// Won't properly work but
+#[no_mangle]
+static mut errno: i32 = 0;
+
 struct Volatile<T> {
     data: T,
 }
