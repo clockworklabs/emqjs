@@ -6,7 +6,10 @@ use data_structures::{
     EMQJS_VALUE_SPACE_LEN,
 };
 use std::path::Path;
-use walrus::ir::{dfs_pre_order_mut, InstrSeqId, LoadKind, MemArg, StoreKind, Value, VisitorMut};
+use walrus::ir::{
+    dfs_pre_order_mut, Block, Call, CallIndirect, Instr, InstrSeq, InstrSeqId, LoadKind, MemArg,
+    StoreKind, Value, Visitor, VisitorMut,
+};
 use walrus::*;
 
 macro_rules! unwrap_enum {
@@ -28,6 +31,14 @@ fn convert_type(ty: ValType) -> anyhow::Result<ValueKind> {
     })
 }
 
+fn convert_result_type(ty: &Type) -> anyhow::Result<Option<ValueKind>> {
+    match ty.results() {
+        [] => Ok(None),
+        [ty] => Ok(Some(convert_type(*ty)?)),
+        _ => anyhow::bail!("Multi-value results are not supported"),
+    }
+}
+
 fn convert_func_type(ty: &Type) -> anyhow::Result<FuncType> {
     anyhow::ensure!(
         ty.params().len() <= EMQJS_VALUE_SPACE_LEN,
@@ -40,11 +51,7 @@ fn convert_func_type(ty: &Type) -> anyhow::Result<FuncType> {
             .copied()
             .map(convert_type)
             .collect::<anyhow::Result<_>>()?,
-        result: match ty.results() {
-            [] => None,
-            [ty] => Some(convert_type(*ty).unwrap()),
-            _ => anyhow::bail!("Multi-value results are not supported"),
-        },
+        result: convert_result_type(ty)?,
     })
 }
 
@@ -60,6 +67,7 @@ struct PreprocessCtx {
     emqjs_value_space: EmqjsValueSpace,
     memory: MemoryId,
     func_id_replacements: Vec<(ImportId, FunctionId, FunctionId)>,
+    trapped: GlobalId,
 }
 
 fn take_export(module: &mut Module, name: &'static str) -> anyhow::Result<ExportItem> {
@@ -478,6 +486,124 @@ impl PreprocessCtx {
 
         Ok(())
     }
+
+    fn process_traps(&mut self) -> anyhow::Result<()> {
+        struct FuncInfo {
+            id: FunctionId,
+            block_ids: Vec<InstrSeqId>,
+        }
+
+        struct AllBlocksVisitor {
+            func_info: FuncInfo,
+            block_needs_replacements: bool,
+            needs_replacements: bool,
+        }
+
+        impl Visitor<'_> for AllBlocksVisitor {
+            fn start_instr_seq(&mut self, _instr_seq: &InstrSeq) {
+                self.block_needs_replacements = false;
+            }
+
+            fn end_instr_seq(&mut self, instr_seq: &InstrSeq) {
+                if self.block_needs_replacements {
+                    self.needs_replacements = true;
+                    self.func_info.block_ids.push(instr_seq.id());
+                }
+            }
+
+            fn visit_call(&mut self, _instr: &Call) {
+                self.block_needs_replacements = true;
+            }
+
+            fn visit_call_indirect(&mut self, _instr: &CallIndirect) {
+                self.block_needs_replacements = true;
+            }
+
+            fn visit_unreachable(&mut self, _instr: &ir::Unreachable) {
+                self.block_needs_replacements = true;
+            }
+        }
+
+        let mut func_infos = Vec::new();
+
+        for (func_id, func) in self.module.funcs.iter_local() {
+            let mut visitor = AllBlocksVisitor {
+                func_info: FuncInfo {
+                    id: func_id,
+                    block_ids: Vec::new(),
+                },
+                block_needs_replacements: false,
+                needs_replacements: false,
+            };
+
+            walrus::ir::dfs_in_order(&mut visitor, func, func.entry_block());
+
+            if visitor.needs_replacements {
+                func_infos.push(visitor.func_info);
+            }
+        }
+
+        for func_info in func_infos {
+            let func = self
+                .module
+                .funcs
+                .get_mut(func_info.id)
+                .kind
+                .unwrap_local_mut();
+
+            let func_ty = func.ty();
+
+            let func_builder = func.builder_mut();
+
+            let body_wrapper = func_builder.dangling_instr_seq(None).id();
+
+            for block_id in func_info.block_ids {
+                let mut block = func_builder.instr_seq(block_id);
+
+                for (instr, _) in std::mem::take(block.instrs_mut()) {
+                    match instr {
+                        Instr::Call(_) => {
+                            block.instr(instr);
+                            block.global_get(self.trapped);
+                            block.br_if(body_wrapper);
+                        }
+                        Instr::CallIndirect(_) => {
+                            block.instr(instr);
+                            block.global_get(self.trapped);
+                            block.br_if(body_wrapper);
+                        }
+                        Instr::Unreachable(_) => {
+                            block.i32_const(1);
+                            block.global_set(self.trapped);
+                            block.br(body_wrapper);
+                        }
+                        _ => {
+                            block.instr(instr);
+                        }
+                    }
+                }
+            }
+
+            let body_instrs = std::mem::take(func_builder.func_body().instrs_mut());
+
+            let mut body_wrapper_builder = func_builder.instr_seq(body_wrapper);
+            *body_wrapper_builder.instrs_mut() = body_instrs;
+            body_wrapper_builder.return_();
+
+            let mut func_body = func_builder.func_body();
+            func_body.instr(Instr::Block(Block { seq: body_wrapper }));
+            if let Some(return_type) = convert_result_type(self.module.types.get(func_ty))? {
+                match return_type {
+                    ValueKind::I32 => func_body.i32_const(0),
+                    ValueKind::I64 => func_body.i64_const(0),
+                    ValueKind::F32 => func_body.f32_const(0.0),
+                    ValueKind::F64 => func_body.f64_const(0.0),
+                };
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -561,11 +687,16 @@ fn threaded_main() -> anyhow::Result<()> {
     };
 
     let mut ctx = PreprocessCtx {
+        trapped: module
+            .globals
+            .add_local(ValType::I32, true, InitExpr::Value(Value::I32(0))),
         module,
         emqjs_value_space,
         memory,
         func_id_replacements: Vec::new(),
     };
+
+    ctx.process_traps()?;
 
     let imports = ctx.process_imports()?;
 
