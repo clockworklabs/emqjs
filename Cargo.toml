@@ -25,6 +25,3 @@ rquickjs = { version = "0.1.7", features = ["macro", "parallel"] }
 
 [patch.crates-io]
 rquickjs = { git = "https://github.com/RReverser/rquickjs", branch = "arraybuffer-view" }
-
-[build-dependencies]
-cc = "1.0.79"
