@@ -5,10 +5,12 @@ use data_structures::{
     Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_JS_LEN,
     EMQJS_VALUE_SPACE_LEN,
 };
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::path::Path;
 use walrus::ir::{
-    dfs_pre_order_mut, Block, Call, CallIndirect, Instr, InstrSeq, InstrSeqId, LoadKind, MemArg,
-    StoreKind, Value, Visitor, VisitorMut,
+    dfs_in_order, dfs_pre_order_mut, Block, Call, CallIndirect, Instr, InstrSeq, InstrSeqId,
+    LoadKind, MemArg, StoreKind, Value, Visitor, VisitorMut,
 };
 use walrus::*;
 
@@ -67,7 +69,7 @@ struct PreprocessCtx {
     emqjs_value_space: EmqjsValueSpace,
     memory: MemoryId,
     func_id_replacements: Vec<(ImportId, FunctionId, FunctionId)>,
-    trapped: GlobalId,
+    thrown: GlobalId,
 }
 
 fn take_export(module: &mut Module, name: &'static str) -> anyhow::Result<ExportItem> {
@@ -493,38 +495,96 @@ impl PreprocessCtx {
             block_ids: Vec<InstrSeqId>,
         }
 
-        struct AllBlocksVisitor {
+        struct AllBlocksVisitor<'t, 'm> {
+            might_throw: &'t mut HashMap<FunctionId, bool>,
+            funcs: &'m ModuleFunctions,
+            imports: &'m ModuleImports,
             func_info: FuncInfo,
-            block_needs_replacements: bool,
-            needs_replacements: bool,
+            block_might_throw: bool,
+            func_might_throw: bool,
         }
 
-        impl Visitor<'_> for AllBlocksVisitor {
+        impl AllBlocksVisitor<'_, '_> {
+            fn might_throw(&mut self, func_id: FunctionId) -> bool {
+                let entry = match self.might_throw.entry(func_id) {
+                    Entry::Occupied(in_cache) => {
+                        return *in_cache.get();
+                    }
+                    Entry::Vacant(v) => v,
+                };
+
+                let func = match &self.funcs.get(func_id).kind {
+                    FunctionKind::Import(imported_func) => {
+                        // assume that JS functions might throw.
+                        let can_throw = self.imports.get(imported_func.import).module == "env";
+                        entry.insert(can_throw);
+                        return can_throw;
+                    }
+                    FunctionKind::Local(local) => {
+                        // Insert `false` to break off recursion.
+                        entry.insert(false);
+                        local
+                    }
+                    FunctionKind::Uninitialized(_) => unreachable!("uninitialized function"),
+                };
+
+                struct TraverseCallsVisitor<'s, 't, 'm> {
+                    this: &'s mut AllBlocksVisitor<'t, 'm>,
+                    might_throw: bool,
+                }
+
+                impl Visitor<'_> for TraverseCallsVisitor<'_, '_, '_> {
+                    fn visit_call(&mut self, instr: &Call) {
+                        self.might_throw |= self.this.might_throw(instr.func);
+                    }
+
+                    fn visit_call_indirect(&mut self, _instr: &CallIndirect) {
+                        self.might_throw |= true;
+                    }
+                }
+
+                let might_throw = {
+                    let mut visitor = TraverseCallsVisitor {
+                        this: self,
+                        might_throw: false,
+                    };
+                    dfs_in_order(&mut visitor, func, func.entry_block());
+                    visitor.might_throw
+                };
+
+                self.might_throw.insert(func_id, might_throw);
+
+                might_throw
+            }
+        }
+
+        impl Visitor<'_> for AllBlocksVisitor<'_, '_> {
             fn start_instr_seq(&mut self, _instr_seq: &InstrSeq) {
-                self.block_needs_replacements = false;
+                self.block_might_throw = false;
             }
 
             fn end_instr_seq(&mut self, instr_seq: &InstrSeq) {
-                if self.block_needs_replacements {
-                    self.needs_replacements = true;
+                if self.block_might_throw {
+                    self.func_might_throw = true;
                     self.func_info.block_ids.push(instr_seq.id());
                 }
             }
 
-            fn visit_call(&mut self, _instr: &Call) {
-                self.block_needs_replacements = true;
+            fn visit_call(&mut self, instr: &Call) {
+                self.block_might_throw = self.might_throw(instr.func);
             }
 
             fn visit_call_indirect(&mut self, _instr: &CallIndirect) {
-                self.block_needs_replacements = true;
+                self.block_might_throw = true;
             }
 
             fn visit_unreachable(&mut self, _instr: &ir::Unreachable) {
-                self.block_needs_replacements = true;
+                self.block_might_throw = true;
             }
         }
 
         let mut func_infos = Vec::new();
+        let mut might_throw = HashMap::new();
 
         for (func_id, func) in self.module.funcs.iter_local() {
             let mut visitor = AllBlocksVisitor {
@@ -532,13 +592,16 @@ impl PreprocessCtx {
                     id: func_id,
                     block_ids: Vec::new(),
                 },
-                block_needs_replacements: false,
-                needs_replacements: false,
+                block_might_throw: false,
+                func_might_throw: false,
+                might_throw: &mut might_throw,
+                funcs: &self.module.funcs,
+                imports: &self.module.imports,
             };
 
             walrus::ir::dfs_in_order(&mut visitor, func, func.entry_block());
 
-            if visitor.needs_replacements {
+            if visitor.func_might_throw {
                 func_infos.push(visitor.func_info);
             }
         }
@@ -551,7 +614,7 @@ impl PreprocessCtx {
                 .kind
                 .unwrap_local_mut();
 
-            let func_ty = func.ty();
+            let return_type = convert_result_type(self.module.types.get(func.ty()))?;
 
             let func_builder = func.builder_mut();
 
@@ -560,25 +623,36 @@ impl PreprocessCtx {
             for block_id in func_info.block_ids {
                 let mut block = func_builder.instr_seq(block_id);
 
-                for (instr, _) in std::mem::take(block.instrs_mut()) {
-                    match instr {
-                        Instr::Call(_) => {
-                            block.instr(instr);
-                            block.global_get(self.trapped);
-                            block.br_if(body_wrapper);
-                        }
-                        Instr::CallIndirect(_) => {
-                            block.instr(instr);
-                            block.global_get(self.trapped);
-                            block.br_if(body_wrapper);
-                        }
-                        Instr::Unreachable(_) => {
-                            block.i32_const(1);
-                            block.global_set(self.trapped);
+                let mut instrs = std::mem::take(block.instrs_mut()).into_iter().peekable();
+
+                while let Some((instr, instr_loc)) = instrs.next() {
+                    let might_throw = match instr {
+                        Instr::Call(Call { func }) => might_throw
+                            .get(&func)
+                            .copied()
+                            .expect("all functions should be in the might_throw cache by now"),
+                        Instr::CallIndirect(_) => true,
+                        _ => false,
+                    };
+
+                    block.instrs_mut().push((instr, instr_loc));
+
+                    if might_throw
+                        && !matches!(
+                            instrs.peek(),
+                            // only insert checks if we don't return or trap immediately,
+                            // otherwise it's okay to propagate flag upwards
+                            None | Some((Instr::Return(_), _))
+                        )
+                    {
+                        // if the next one is `unreachable`, then break off without checking -
+                        // the exception is clearly expected
+                        if let Some((Instr::Unreachable(_), _)) = instrs.peek() {
                             block.br(body_wrapper);
-                        }
-                        _ => {
-                            block.instr(instr);
+                        } else {
+                            // Otherwise check if the thrown flag got set.
+                            block.global_get(self.thrown);
+                            block.br_if(body_wrapper);
                         }
                     }
                 }
@@ -592,7 +666,7 @@ impl PreprocessCtx {
 
             let mut func_body = func_builder.func_body();
             func_body.instr(Instr::Block(Block { seq: body_wrapper }));
-            if let Some(return_type) = convert_result_type(self.module.types.get(func_ty))? {
+            if let Some(return_type) = return_type {
                 match return_type {
                     ValueKind::I32 => func_body.i32_const(0),
                     ValueKind::I64 => func_body.i64_const(0),
@@ -687,7 +761,7 @@ fn threaded_main() -> anyhow::Result<()> {
     };
 
     let mut ctx = PreprocessCtx {
-        trapped: module
+        thrown: module
             .globals
             .add_local(ValType::I32, true, InitExpr::Value(Value::I32(0))),
         module,
