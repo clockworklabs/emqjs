@@ -164,6 +164,13 @@ impl PreprocessCtx {
                     }
                     .make_load();
                 }
+
+                // If the import has not succeeded (indicated by `false` return of `emqjs_invoke_import`),
+                // then start internal unwinding.
+                new_func_body.br_if(new_func_body.id());
+                new_func_body.i32_const(1);
+                new_func_body.global_set(self.thrown);
+
                 let new_func_id = new_func.finish(params, &mut self.module.funcs);
 
                 self.func_id_replacements
@@ -215,6 +222,8 @@ impl PreprocessCtx {
 
         let space = self.emqjs_value_space;
 
+        let thrown = self.thrown;
+
         let block_builders = exports.iter().zip(export_func_ids).map(|(func, func_id)| {
             move |block: &mut InstrSeqBuilder| {
                 let call_func = |block: &mut InstrSeqBuilder| {
@@ -239,6 +248,10 @@ impl PreprocessCtx {
                     }
                     .make_store(call_func),
                 }
+
+                // Stop unwinding, it's now responsibility of JS to check for exceptions.
+                block.i32_const(0);
+                block.global_set(thrown);
 
                 block.return_();
             }
@@ -381,6 +394,8 @@ impl PreprocessCtx {
         // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
         let space = self.emqjs_value_space;
 
+        let thrown = self.thrown;
+
         let block_builders = types.iter().zip(&dests).map(|(func_ty, func_id)| {
             move |block: &mut InstrSeqBuilder| {
                 let func_ty = match func_ty {
@@ -416,6 +431,10 @@ impl PreprocessCtx {
                     }
                     .make_store(call_func),
                 }
+
+                // Stop unwinding, it's now responsibility of JS to check for exceptions.
+                block.i32_const(0);
+                block.global_set(thrown);
 
                 block.return_();
             }

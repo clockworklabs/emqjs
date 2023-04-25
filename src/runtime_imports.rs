@@ -5,7 +5,7 @@ use crate::web_assembly::{Memory, Table};
 use crate::{with_active_ctx, Volatile};
 use once_cell::unsync::OnceCell;
 use rkyv::Archive;
-use rquickjs::{Ctx, FromJs};
+use rquickjs::{qjs, Ctx, FromJs, Persistent};
 use rquickjs::{IntoJs, Rest};
 
 /// encoded Vec<ImportRequest>
@@ -26,6 +26,9 @@ union Value {
 static mut EMQJS_VALUE_SPACE: Volatile<[Value; EMQJS_VALUE_SPACE_LEN]> =
     Volatile::new([Value { i64: 0 }; EMQJS_VALUE_SPACE_LEN]);
 
+#[no_mangle]
+static mut EMQJS_EXCEPTION: Option<Persistent<rquickjs::Value>> = None;
+
 struct WasmCtx {
     module: &'static <Module as Archive>::Archived,
     imports: Box<[rquickjs::Persistent<rquickjs::Function<'static>>]>,
@@ -38,13 +41,24 @@ impl WasmCtx {
     ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
         let module = unsafe { rkyv::archived_root::<Module>(&EMQJS_ENCODED_MODULE[..]) };
 
-        tracing::debug!("{:#?}", module);
+        let import_wrapper: rquickjs::Function = ctx.eval(
+            r"
+        func => (...args) => {
+            try {
+                return [true, func(...args)];
+            } catch (e) {
+                return [false, e];
+            }
+        }",
+        )?;
 
         let imports = module
             .imports
             .iter()
             .map(|i| {
                 let func: rquickjs::Function = imports.get(i.name.as_str())?;
+                let func: rquickjs::Function = import_wrapper.call((func,))?;
+                func.set_name(format!("try_catch:{}", i.name));
                 Ok(rquickjs::Persistent::save(ctx, func))
             })
             .collect::<rquickjs::Result<_>>()?;
@@ -58,10 +72,7 @@ impl WasmCtx {
             .try_for_each(|(i, e)| match e {
                 ArchivedExport::Func(e) => {
                     let func = wrap_export(ctx, &e.ty, move || {
-                        tracing::debug!(
-                            "Invoking export {i} (original name {name})",
-                            name = e.name
-                        );
+                        println!("Invoking export {i} (original name {name})", name = e.name);
                         unsafe { emqjs_invoke_export(i) }
                     })?;
                     exports.set(e.name.as_str(), func)
@@ -76,7 +87,7 @@ impl WasmCtx {
                                 None => return Ok(None),
                             };
                             wrap_export(ctx, ty, move || {
-                                tracing::debug!("Invoking table {i}");
+                                println!("Invoking table {i}");
                                 unsafe { emqjs_invoke_table(i) }
                             })
                             .map(Some)
@@ -100,6 +111,8 @@ fn wrap_export<'js>(
     rquickjs::Function::new(
         ctx,
         move |ctx: Ctx<'js>, params: Rest<rquickjs::Value<'js>>| {
+            println!("Passing args {:?}", &params.0);
+
             ty.params
                 .iter()
                 .zip(params.into_inner())
@@ -109,13 +122,24 @@ fn wrap_export<'js>(
 
             invoke_callback();
 
+            if let Some(e) = unsafe { EMQJS_EXCEPTION.take() } {
+                let e = e.restore(ctx)?;
+                println!("Got exception {e:?}");
+                return Ok(Some(unsafe {
+                    rquickjs::Value::from_js_value(
+                        ctx,
+                        qjs::JS_Throw(ctx.as_ptr(), e.into_js_value()),
+                    )
+                }));
+            }
+
             let result = ty
                 .result
                 .as_ref()
                 .map(|kind| into_js(ctx, *kind, unsafe { EMQJS_VALUE_SPACE[0] }))
                 .transpose();
 
-            tracing::debug!("Got result {result:?}");
+            println!("Got result {result:?}");
 
             result
         },
@@ -173,15 +197,14 @@ fn from_js<'js>(
 }
 
 #[no_mangle]
-pub extern "C" fn emqjs_invoke_import(index: usize) {
+pub extern "C" fn emqjs_invoke_import(index: usize) -> bool {
     let (ty, func) = IMPORTS_CTX.with(|imports_ctx| {
         let imports_ctx = imports_ctx.get().expect("imports weren't provided yet");
         let ty = &imports_ctx.module.imports[index].ty;
         let func = imports_ctx.imports[index].clone();
         (ty, func)
     });
-    with_active_ctx(|ctx| -> rquickjs::Result<()> {
-        tracing::debug!("Active context: {ctx:?}", ctx = ctx.as_ptr());
+    with_active_ctx(|ctx| -> rquickjs::Result<_> {
         // todo: try to avoid this allocation
         let args = ty
             .params
@@ -189,14 +212,33 @@ pub extern "C" fn emqjs_invoke_import(index: usize) {
             .zip(unsafe { EMQJS_VALUE_SPACE.iter() })
             .map(|(ty, value)| into_js(ctx, *ty, *value))
             .collect::<rquickjs::Result<Vec<_>>>()?;
-        let result = func.clone().restore(ctx)?.call((Rest(args),))?;
+        println!(
+            "Invoking import {index} -> {func} with signature {sig:?} and args {args:?}",
+            func = func
+                .clone()
+                .restore(ctx)?
+                .as_object()
+                .get::<_, String>("name")?,
+            sig = ty,
+        );
+        let result: rquickjs::Array = func.clone().restore(ctx)?.call((Rest(args),))?;
+        let is_ok = result.get::<bool>(0)?;
+        if !is_ok {
+            unsafe {
+                if EMQJS_EXCEPTION.is_none() {
+                    let e = result.get::<rquickjs::Value>(1)?;
+                    EMQJS_EXCEPTION = Some(Persistent::save(ctx, e));
+                }
+            }
+            return Ok(false);
+        }
         if let Some(&result_type) = ty.result.as_ref() {
-            let value = from_js(ctx, result_type, result)?;
+            let value = from_js(ctx, result_type, result.get(1)?)?;
             unsafe {
                 *EMQJS_VALUE_SPACE.get_unchecked_mut(0) = value;
             }
         }
-        Ok(())
+        Ok(true)
     })
     .unwrap()
 }

@@ -221,6 +221,8 @@ pub(crate) fn with_active_ctx<'js, T>(f: impl FnOnce(Ctx<'js>) -> T) -> T {
 static EMQJS_JS: Volatile<[u8; EMQJS_JS_LEN]> = Volatile::new([0; EMQJS_JS_LEN]);
 
 fn start() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
     let runtime = Runtime::new()?;
     let context = Context::full(&runtime)?;
     context.with(|ctx| -> rquickjs::Result<_> {
