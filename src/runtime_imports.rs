@@ -38,7 +38,7 @@ impl WasmCtx {
     ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
         let module = unsafe { rkyv::archived_root::<Module>(&EMQJS_ENCODED_MODULE[..]) };
 
-        println!("{:#?}", module);
+        tracing::debug!("{:#?}", module);
 
         let imports = module
             .imports
@@ -58,7 +58,10 @@ impl WasmCtx {
             .try_for_each(|(i, e)| match e {
                 ArchivedExport::Func(e) => {
                     let func = wrap_export(ctx, &e.ty, move || {
-                        println!("Invoking export {i} (original name {name})", name = e.name);
+                        tracing::debug!(
+                            "Invoking export {i} (original name {name})",
+                            name = e.name
+                        );
                         unsafe { emqjs_invoke_export(i) }
                     })?;
                     exports.set(e.name.as_str(), func)
@@ -73,7 +76,7 @@ impl WasmCtx {
                                 None => return Ok(None),
                             };
                             wrap_export(ctx, ty, move || {
-                                println!("Invoking table {i}");
+                                tracing::debug!("Invoking table {i}");
                                 unsafe { emqjs_invoke_table(i) }
                             })
                             .map(Some)
@@ -112,7 +115,7 @@ fn wrap_export<'js>(
                 .map(|kind| into_js(ctx, *kind, unsafe { EMQJS_VALUE_SPACE[0] }))
                 .transpose();
 
-            println!("Got result {result:?}");
+            tracing::debug!("Got result {result:?}");
 
             result
         },
@@ -178,7 +181,7 @@ pub extern "C" fn emqjs_invoke_import(index: usize) {
         (ty, func)
     });
     with_active_ctx(|ctx| -> rquickjs::Result<()> {
-        println!("Active context: {ctx:?}", ctx = ctx.as_ptr());
+        tracing::debug!("Active context: {ctx:?}", ctx = ctx.as_ptr());
         // todo: try to avoid this allocation
         let args = ty
             .params

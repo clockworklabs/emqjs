@@ -118,7 +118,7 @@ impl PreprocessCtx {
             .filter(|&(_, _, name)| name != "emqjs_invoke_export" && name != "emqjs_invoke_table")
             .enumerate()
             .map(|(table_index, (import_id, func_id, name))| {
-                println!("Converting import {name}");
+                tracing::debug!("Converting import {name}");
 
                 let func_ty = self
                     .module
@@ -200,7 +200,7 @@ impl PreprocessCtx {
             })
             .filter(|&(name, _)| name != "emqjs_invoke_import")
             .map(|(name, func_id)| {
-                println!("Converting export {name}");
+                tracing::debug!("Converting export {name}");
 
                 export_func_ids.push(func_id);
 
