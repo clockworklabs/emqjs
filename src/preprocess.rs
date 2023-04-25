@@ -640,7 +640,7 @@ impl PreprocessCtx {
                     if might_throw
                         && !matches!(
                             instrs.peek(),
-                            // only insert checks if we don't return or trap immediately,
+                            // only insert checks if we don't return immediately,
                             // otherwise it's okay to propagate flag upwards
                             None | Some((Instr::Return(_), _))
                         )
