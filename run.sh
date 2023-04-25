@@ -13,5 +13,5 @@ emcc -o temp.js temp.cpp target/wasm32-wasi/debug/libemqjs_runtime.a \
 	-s ERROR_ON_UNDEFINED_SYMBOLS=0 \
 	-s STACK_SIZE=1mb \
 	-Wl,--allow-undefined
-cargo run --bin emqjs_preprocess
+cargo run --bin emqjs_preprocess -- temp.wasm temp.out.wasm
 wasmtime temp.out.wasm --dir=.
