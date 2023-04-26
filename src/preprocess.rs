@@ -155,6 +155,16 @@ impl PreprocessCtx {
                 }
                 new_func_body.i32_const(table_index as i32);
                 new_func_body.call(emqjs_invoke_import);
+
+                new_func_body.if_else(
+                    None,
+                    |_| {},
+                    |on_error| {
+                        on_error.i32_const(1);
+                        on_error.global_set(self.thrown);
+                    },
+                );
+
                 if let Some(result_ty) = converted_func_ty.result {
                     EmqjsSlot {
                         space: self.emqjs_value_space,
@@ -164,12 +174,6 @@ impl PreprocessCtx {
                     }
                     .make_load();
                 }
-
-                // If the import has not succeeded (indicated by `false` return of `emqjs_invoke_import`),
-                // then start internal unwinding.
-                new_func_body.br_if(new_func_body.id());
-                new_func_body.i32_const(1);
-                new_func_body.global_set(self.thrown);
 
                 let new_func_id = new_func.finish(params, &mut self.module.funcs);
 
