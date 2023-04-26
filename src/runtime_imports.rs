@@ -147,7 +147,6 @@ fn wrap_export<'js>(
 }
 
 thread_local! {
-    // ideally this would be OnceCell but ImportsCtx is !Send, so we need a full Mutex
     static IMPORTS_CTX: OnceCell<WasmCtx> = OnceCell::new();
 }
 
