@@ -1,4 +1,5 @@
 mod data_structures;
+mod runtime_externs;
 mod runtime_imports;
 
 use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Rest, Runtime, Value};
@@ -216,12 +217,6 @@ pub(crate) fn with_active_ctx<'js, T>(f: impl FnOnce(Ctx<'js>) -> T) -> T {
     })
 }
 
-// serialized JS code
-extern "C" {
-    fn emqjs_js_len() -> usize;
-    fn emqjs_js(dest: *mut u8);
-}
-
 fn start() -> anyhow::Result<()> {
     // tracing_subscriber::fmt::init();
 
@@ -246,9 +241,9 @@ fn start() -> anyhow::Result<()> {
                 std::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx)
             }));
             let js_bytes = unsafe {
-                let mut bytes = Vec::with_capacity(emqjs_js_len());
-                emqjs_js(bytes.as_mut_ptr());
-                bytes.set_len(emqjs_js_len());
+                let mut bytes = Vec::with_capacity(runtime_externs::js_len());
+                runtime_externs::js(bytes.as_mut_ptr());
+                bytes.set_len(runtime_externs::js_len());
                 bytes
             };
             let result = ctx.eval(js_bytes);

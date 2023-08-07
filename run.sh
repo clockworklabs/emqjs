@@ -11,8 +11,7 @@ emcc -o temp.js temp.cpp target/wasm32-wasi/debug/libemqjs_runtime.a \
 	-s ASSERTIONS \
 	-s EXPORTED_FUNCTIONS=@exported_funcs.list \
 	-fexceptions \
-	-s ERROR_ON_UNDEFINED_SYMBOLS=0 \
-	-s STACK_SIZE=1mb \
-	-Wl,--allow-undefined
+	-s WARN_ON_UNDEFINED_SYMBOLS=0 \
+	-s STACK_SIZE=1mb
 cargo run --bin emqjs_preprocess -- temp.wasm temp.out.wasm
 wasmtime temp.out.wasm --dir=.

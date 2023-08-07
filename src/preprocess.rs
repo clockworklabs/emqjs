@@ -107,12 +107,13 @@ impl PreprocessCtx {
             .imports
             .iter_mut()
             .filter_map(|i| match i.kind {
+                // this will skip WASI imports as well as our injected `emqjs` imports, processing only custom C functions
+                // which is what we want to transform
                 ImportKind::Function(func_id) if i.module == "env" => {
                     Some((i.id(), func_id, i.name.as_str()))
                 }
                 _ => None,
             })
-            .filter(|&(_, _, name)| name != "emqjs_invoke_export" && name != "emqjs_invoke_table")
             .enumerate()
             .map(|(table_index, (import_id, func_id, name))| {
                 tracing::debug!("Converting import {name}");
@@ -269,21 +270,7 @@ impl PreprocessCtx {
 
         let new_func_id = emqjs_invoke_export.finish(vec![discriminant], &mut self.module.funcs);
 
-        // Find an import to `emqjs_invoke_export` - we'll want to replace it.
-        let import_id = self
-            .module
-            .imports
-            .find("env", "emqjs_invoke_export")
-            .context("Could not find import for `env.emqjs_invoke_export`")?;
-
-        // Get its function id and delete the import.
-        let func_id = match &self.module.imports.get(import_id).kind {
-            ImportKind::Function(func_id) => *func_id,
-            _ => anyhow::bail!("`env.emqjs_invoke_export` is imported as non-function"),
-        };
-
-        self.func_id_replacements
-            .push((import_id, func_id, new_func_id));
+        self.replace_emqjs_import("invoke_export", new_func_id)?;
 
         Ok(exports)
     }
@@ -297,14 +284,19 @@ impl PreprocessCtx {
         let bytes_len = bytes.len() as i32;
 
         {
+            let name = format!("{name}_len");
+
             let mut builder = FunctionBuilder::new(&mut self.module.types, &[], &[ValType::I32]);
+            builder.name(name.clone());
             builder.func_body().i32_const(bytes_len);
-            let func_id = builder.finish(vec![], &mut self.module.funcs);
-            self.module.exports.add(&format!("{name}_len"), func_id);
+            let new_func_id = builder.finish(vec![], &mut self.module.funcs);
+
+            self.replace_emqjs_import(&name, new_func_id)?;
         }
 
         {
             let mut builder = FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
+            builder.name(name.to_owned());
             let ptr_param_id = self.module.locals.add(ValType::I32);
             let data_id = self.module.data.add(DataKind::Passive, bytes);
             builder
@@ -314,10 +306,30 @@ impl PreprocessCtx {
                 .i32_const(bytes_len)
                 .memory_init(self.memory, data_id)
                 .data_drop(data_id);
-            let func_id = builder.finish(vec![ptr_param_id], &mut self.module.funcs);
-            self.module.exports.add(name, func_id);
+            let new_func_id = builder.finish(vec![ptr_param_id], &mut self.module.funcs);
+
+            self.replace_emqjs_import(name, new_func_id)?;
         }
 
+        Ok(())
+    }
+
+    fn replace_emqjs_import(
+        &mut self,
+        name: &str,
+        new_func_id: FunctionId,
+    ) -> Result<(), anyhow::Error> {
+        let import_id = self
+            .module
+            .imports
+            .find("emqjs", name)
+            .with_context(|| format!("Could not find import for `emqjs.{name}`"))?;
+        let func_id = match &self.module.imports.get(import_id).kind {
+            ImportKind::Function(func_id) => *func_id,
+            _ => anyhow::bail!("`env.{name}` is imported as non-function"),
+        };
+        self.func_id_replacements
+            .push((import_id, func_id, new_func_id));
         Ok(())
     }
 
@@ -458,21 +470,7 @@ impl PreprocessCtx {
 
         let new_func_id = emqjs_invoke_table.finish(vec![discriminant], &mut self.module.funcs);
 
-        // Find an import to `emqjs_invoke_table` - we'll want to replace it.
-        let import_id = self
-            .module
-            .imports
-            .find("env", "emqjs_invoke_table")
-            .context("Could not find import for `env.emqjs_invoke_table`")?;
-
-        // Get its function id and delete the import.
-        let func_id = match &self.module.imports.get(import_id).kind {
-            ImportKind::Function(func_id) => *func_id,
-            _ => anyhow::bail!("`env.emqjs_invoke_table` is imported as non-function"),
-        };
-
-        self.func_id_replacements
-            .push((import_id, func_id, new_func_id));
+        self.replace_emqjs_import("invoke_table", new_func_id)?;
 
         Ok(types)
     }
@@ -830,9 +828,9 @@ fn threaded_main() -> anyhow::Result<()> {
 
     let emqjs_encoded_module = rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?;
 
-    ctx.write_to_static_byte_array("emqjs_encoded_module", emqjs_encoded_module)?;
+    ctx.write_to_static_byte_array("encoded_module", emqjs_encoded_module)?;
 
-    ctx.write_to_static_byte_array("emqjs_js", std::fs::read(input_js)?)?;
+    ctx.write_to_static_byte_array("js", std::fs::read(input_js)?)?;
 
     // Original _start is preserved in the trampoline now.
     // Replace the Wasm `_start` with `emqjs_start` export that starts the JS runtime instead.
