@@ -58,7 +58,7 @@ impl WasmCtx {
             .map(|i| {
                 let func: rquickjs::Function = imports.get(i.name.as_str())?;
                 let func: rquickjs::Function = import_wrapper.call((func,))?;
-                func.set_name(format!("try_catch:{}", i.name));
+                func.set_name(format!("try_catch:{}", i.name))?;
                 Ok(rquickjs::Persistent::save(ctx, func))
             })
             .collect::<rquickjs::Result<_>>()?;
