@@ -1,7 +1,6 @@
 mod data_structures;
 mod runtime_imports;
 
-use data_structures::EMQJS_JS_LEN;
 use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Rest, Runtime, Value};
 use std::cell::Cell;
 
@@ -217,8 +216,11 @@ pub(crate) fn with_active_ctx<'js, T>(f: impl FnOnce(Ctx<'js>) -> T) -> T {
     })
 }
 
-#[no_mangle]
-static EMQJS_JS: Volatile<[u8; EMQJS_JS_LEN]> = Volatile::new([0; EMQJS_JS_LEN]);
+// serialized JS code
+extern "C" {
+    fn emqjs_js_len() -> usize;
+    fn emqjs_js(dest: *mut u8);
+}
 
 fn start() -> anyhow::Result<()> {
     // tracing_subscriber::fmt::init();
@@ -243,7 +245,13 @@ fn start() -> anyhow::Result<()> {
                 // erase lifetime to static so that we could put it into the thread-local
                 std::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx)
             }));
-            let result = ctx.eval(&EMQJS_JS[..EMQJS_JS.iter().position(|b| *b == 0).unwrap_or(0)]);
+            let js_bytes = unsafe {
+                let mut bytes = Vec::with_capacity(emqjs_js_len());
+                emqjs_js(bytes.as_mut_ptr());
+                bytes.set_len(emqjs_js_len());
+                bytes
+            };
+            let result = ctx.eval(js_bytes);
             // println!("Unsetting active context");
             active_ctx.set(None);
             result

@@ -1,10 +1,7 @@
 mod data_structures;
 
 use anyhow::Context;
-use data_structures::{
-    Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_JS_LEN,
-    EMQJS_VALUE_SPACE_LEN,
-};
+use data_structures::{Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_VALUE_SPACE_LEN};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
@@ -294,26 +291,32 @@ impl PreprocessCtx {
     fn write_to_static_byte_array(
         &mut self,
         name: &'static str,
-        offset: usize,
         bytes: impl Into<Vec<u8>>,
-        max_len: usize,
     ) -> anyhow::Result<()> {
         let bytes = bytes.into();
+        let bytes_len = bytes.len() as i32;
 
-        anyhow::ensure!(
-            offset + bytes.len() <= max_len,
-            "Data for array {name} is too long"
-        );
+        {
+            let mut builder = FunctionBuilder::new(&mut self.module.types, &[], &[ValType::I32]);
+            builder.func_body().i32_const(bytes_len);
+            let func_id = builder.finish(vec![], &mut self.module.funcs);
+            self.module.exports.add(&format!("{name}_len"), func_id);
+        }
 
-        let ptr = take_pointer_global(&mut self.module, name)?;
-
-        self.module.data.add(
-            DataKind::Active(ActiveData {
-                memory: self.memory,
-                location: ActiveDataLocation::Absolute(ptr as u32 + offset as u32),
-            }),
-            bytes,
-        );
+        {
+            let mut builder = FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
+            let ptr_param_id = self.module.locals.add(ValType::I32);
+            let data_id = self.module.data.add(DataKind::Passive, bytes);
+            builder
+                .func_body()
+                .local_get(ptr_param_id)
+                .i32_const(0)
+                .i32_const(bytes_len)
+                .memory_init(self.memory, data_id)
+                .data_drop(data_id);
+            let func_id = builder.finish(vec![ptr_param_id], &mut self.module.funcs);
+            self.module.exports.add(name, func_id);
+        }
 
         Ok(())
     }
@@ -827,24 +830,9 @@ fn threaded_main() -> anyhow::Result<()> {
 
     let emqjs_encoded_module = rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?;
 
-    ctx.write_to_static_byte_array(
-        "EMQJS_ENCODED_MODULE",
-        // rkyv expects archived root to be at the end of the slice
-        // so we need to write it at the end of the static array given to us
-        EMQJS_ENCODED_MODULE_LEN
-            .checked_sub(emqjs_encoded_module.len())
-            .with_context(|| {
-                format!(
-                    "Encoded module is too big: {} bytes, won't fit into the allocated {} bytes",
-                    emqjs_encoded_module.len(),
-                    EMQJS_ENCODED_MODULE_LEN
-                )
-            })?,
-        emqjs_encoded_module,
-        EMQJS_ENCODED_MODULE_LEN,
-    )?;
+    ctx.write_to_static_byte_array("emqjs_encoded_module", emqjs_encoded_module)?;
 
-    ctx.write_to_static_byte_array("EMQJS_JS", 0, std::fs::read(input_js)?, EMQJS_JS_LEN)?;
+    ctx.write_to_static_byte_array("emqjs_js", std::fs::read(input_js)?)?;
 
     // Original _start is preserved in the trampoline now.
     // Replace the Wasm `_start` with `emqjs_start` export that starts the JS runtime instead.

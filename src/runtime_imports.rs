@@ -1,17 +1,17 @@
-use crate::data_structures::{
-    ArchivedExport, FuncType, Module, ValueKind, EMQJS_ENCODED_MODULE_LEN, EMQJS_VALUE_SPACE_LEN,
-};
+use crate::data_structures::{ArchivedExport, FuncType, Module, ValueKind, EMQJS_VALUE_SPACE_LEN};
 use crate::web_assembly::{Memory, Table};
 use crate::{with_active_ctx, Volatile};
+use once_cell::sync::Lazy;
 use once_cell::unsync::OnceCell;
 use rkyv::Archive;
 use rquickjs::{qjs, Ctx, FromJs, Persistent};
 use rquickjs::{IntoJs, Rest};
 
-/// encoded Vec<ImportRequest>
-#[no_mangle]
-static EMQJS_ENCODED_MODULE: Volatile<[u8; EMQJS_ENCODED_MODULE_LEN]> =
-    Volatile::new([0; EMQJS_ENCODED_MODULE_LEN]);
+// encoded Vec<ImportRequest>
+extern "C" {
+    fn emqjs_encoded_module_len() -> usize;
+    fn emqjs_encoded_module(dest: *mut u8);
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -39,7 +39,14 @@ impl WasmCtx {
         ctx: rquickjs::Ctx<'js>,
         imports: rquickjs::Object<'js>,
     ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
-        let module = unsafe { rkyv::archived_root::<Module>(&EMQJS_ENCODED_MODULE[..]) };
+        static MODULE_BYTES: Lazy<Vec<u8>> = Lazy::new(|| unsafe {
+            let mut bytes = Vec::with_capacity(emqjs_encoded_module_len());
+            emqjs_encoded_module(bytes.as_mut_ptr());
+            bytes.set_len(emqjs_encoded_module_len());
+            bytes
+        });
+
+        let module = unsafe { rkyv::archived_root::<Module>(&MODULE_BYTES) };
 
         let import_wrapper: rquickjs::Function = ctx.eval(
             r"
