@@ -190,7 +190,7 @@ impl PreprocessCtx {
         Ok(imports)
     }
 
-    /// Create `emqjs_invoke_export` trampoline for stores params-results in `EMQJS_VALUE_SPACE` and invokes the underlying export function.
+    /// Create `emqjs_invoke_export` trampoline for stored params-results in `EMQJS_VALUE_SPACE` and invokes the underlying export function.
     ///
     /// Returns list of function descriptors for the JS side.
     fn process_func_exports(&mut self) -> anyhow::Result<Vec<Func>> {

@@ -3,7 +3,7 @@
 use rkyv::{Archive, Serialize};
 
 #[derive(Debug, Archive, Serialize, Clone, Copy)]
-#[archive(as = "ValueKind")] // avoid creating separate representation anum for achiving
+#[archive(as = "ValueKind")] // avoid creating separate representation enum for archiving
 #[allow(dead_code)] // Rust thinks those variants aren't constructed but they're by rkyv
 pub enum ValueKind {
     I32,
