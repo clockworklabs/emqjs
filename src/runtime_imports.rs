@@ -72,7 +72,7 @@ impl WasmCtx {
             .try_for_each(|(i, e)| match e {
                 ArchivedExport::Func(e) => {
                     let func = wrap_export(ctx, &e.ty, move || {
-                        println!("Invoking export {i} (original name {name})", name = e.name);
+                        // println!("Invoking export {i} (original name {name})", name = e.name);
                         unsafe { emqjs_invoke_export(i) }
                     })?;
                     exports.set(e.name.as_str(), func)
@@ -87,7 +87,7 @@ impl WasmCtx {
                                 None => return Ok(None),
                             };
                             wrap_export(ctx, ty, move || {
-                                println!("Invoking table {i}");
+                                // println!("Invoking table {i}");
                                 unsafe { emqjs_invoke_table(i) }
                             })
                             .map(Some)
@@ -111,7 +111,7 @@ fn wrap_export<'js>(
     rquickjs::Function::new(
         ctx,
         move |ctx: Ctx<'js>, params: Rest<rquickjs::Value<'js>>| {
-            println!("Passing args {:?}", &params.0);
+            // println!("Passing args {:?}", &params.0);
 
             ty.params
                 .iter()
@@ -124,7 +124,7 @@ fn wrap_export<'js>(
 
             if let Some(e) = unsafe { EMQJS_EXCEPTION.take() } {
                 let e = e.restore(ctx)?;
-                println!("Got exception {e:?}");
+                // println!("Got exception {e:?}");
                 return Ok(Some(unsafe {
                     rquickjs::Value::from_js_value(
                         ctx,
@@ -139,7 +139,7 @@ fn wrap_export<'js>(
                 .map(|kind| into_js(ctx, *kind, unsafe { EMQJS_VALUE_SPACE[0] }))
                 .transpose();
 
-            println!("Got result {result:?}");
+            // println!("Got result {result:?}");
 
             result
         },
@@ -211,15 +211,15 @@ pub extern "C" fn emqjs_invoke_import(index: usize) -> bool {
             .zip(unsafe { EMQJS_VALUE_SPACE.iter() })
             .map(|(ty, value)| into_js(ctx, *ty, *value))
             .collect::<rquickjs::Result<Vec<_>>>()?;
-        println!(
-            "Invoking import {index} -> {func} with signature {sig:?} and args {args:?}",
-            func = func
-                .clone()
-                .restore(ctx)?
-                .as_object()
-                .get::<_, String>("name")?,
-            sig = ty,
-        );
+        // println!(
+        //     "Invoking import {index} -> {func} with signature {sig:?} and args {args:?}",
+        //     func = func
+        //         .clone()
+        //         .restore(ctx)?
+        //         .as_object()
+        //         .get::<_, String>("name")?,
+        //     sig = ty,
+        // );
         let result: rquickjs::Array = func.clone().restore(ctx)?.call((Rest(args),))?;
         let is_ok = result.get::<bool>(0)?;
         if !is_ok {

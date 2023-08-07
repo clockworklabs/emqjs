@@ -234,7 +234,7 @@ fn start() -> anyhow::Result<()> {
 
     context.with(|ctx| -> rquickjs::Result<_> {
         ACTIVE_CTX.with(|active_ctx| {
-            println!("Setting active context: {ctx:?}", ctx = ctx.as_ptr());
+            // println!("Setting active context: {ctx:?}", ctx = ctx.as_ptr());
             assert!(
                 active_ctx.get().is_none(),
                 "tried to set active context while another one is active"
@@ -244,7 +244,7 @@ fn start() -> anyhow::Result<()> {
                 std::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx)
             }));
             let result = ctx.eval(&EMQJS_JS[..EMQJS_JS.iter().position(|b| *b == 0).unwrap_or(0)]);
-            println!("Unsetting active context");
+            // println!("Unsetting active context");
             active_ctx.set(None);
             result
         })
