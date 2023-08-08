@@ -42,24 +42,11 @@ impl WasmCtx {
 
         let module = unsafe { rkyv::archived_root::<Module>(&MODULE_BYTES) };
 
-        let import_wrapper: rquickjs::Function = ctx.eval(
-            r"
-        func => (...args) => {
-            try {
-                return [true, func(...args)];
-            } catch (e) {
-                return [false, e];
-            }
-        }",
-        )?;
-
         let imports = module
             .imports
             .iter()
             .map(|i| {
                 let func: rquickjs::Function = imports.get(i.name.as_str())?;
-                let func: rquickjs::Function = import_wrapper.call((func,))?;
-                func.set_name(format!("try_catch:{}", i.name))?;
                 Ok(rquickjs::Persistent::save(ctx, func))
             })
             .collect::<rquickjs::Result<_>>()?;
@@ -225,24 +212,27 @@ pub extern "C" fn emqjs_invoke_import(index: usize) -> bool {
         //         .get::<_, String>("name")?,
         //     sig = ty,
         // );
-        let result: rquickjs::Array = func.clone().restore(ctx)?.call((Rest(args),))?;
-        let is_ok = result.get::<bool>(0)?;
-        if !is_ok {
-            unsafe {
-                if EMQJS_EXCEPTION.is_none() {
-                    let e = result.get::<rquickjs::Value>(1)?;
-                    EMQJS_EXCEPTION = Some(Persistent::save(ctx, e));
+        match func.clone().restore(ctx)?.call((Rest(args),)) {
+            Ok(value) => {
+                if let Some(&result_type) = ty.result.as_ref() {
+                    let value = from_js(ctx, result_type, value)?;
+                    unsafe {
+                        *EMQJS_VALUE_SPACE.get_unchecked_mut(0) = value;
+                    }
                 }
+                Ok(true)
             }
-            return Ok(false);
-        }
-        if let Some(&result_type) = ty.result.as_ref() {
-            let value = from_js(ctx, result_type, result.get(1)?)?;
-            unsafe {
-                *EMQJS_VALUE_SPACE.get_unchecked_mut(0) = value;
+            Err(rquickjs::Error::Exception) => {
+                unsafe {
+                    if EMQJS_EXCEPTION.is_none() {
+                        let e = ctx.catch();
+                        EMQJS_EXCEPTION = Some(Persistent::save(ctx, e));
+                    }
+                }
+                Ok(false)
             }
+            Err(e) => Err(e),
         }
-        Ok(true)
     })
     .unwrap()
 }
