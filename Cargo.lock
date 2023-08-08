@@ -382,7 +382,8 @@ dependencies = [
 
 [[package]]
 name = "rquickjs"
-version = "0.1.7"
+version = "0.3.1"
+source = "git+https://github.com/RReverser/rquickjs?branch=wasi#f8da42e4583bac24e9fee365457a312a77b4aaf9"
 dependencies = [
  "rquickjs-core",
  "rquickjs-macro",
@@ -390,7 +391,8 @@ dependencies = [
 
 [[package]]
 name = "rquickjs-core"
-version = "0.1.7"
+version = "0.3.1"
+source = "git+https://github.com/RReverser/rquickjs?branch=wasi#f8da42e4583bac24e9fee365457a312a77b4aaf9"
 dependencies = [
  "relative-path",
  "rquickjs-sys",
@@ -398,7 +400,8 @@ dependencies = [
 
 [[package]]
 name = "rquickjs-macro"
-version = "0.1.7"
+version = "0.3.1"
+source = "git+https://github.com/RReverser/rquickjs?branch=wasi#f8da42e4583bac24e9fee365457a312a77b4aaf9"
 dependencies = [
  "darling",
  "fnv",
@@ -414,7 +417,8 @@ dependencies = [
 
 [[package]]
 name = "rquickjs-sys"
-version = "0.1.7"
+version = "0.3.1"
+source = "git+https://github.com/RReverser/rquickjs?branch=wasi#f8da42e4583bac24e9fee365457a312a77b4aaf9"
 dependencies = [
  "cc",
 ]

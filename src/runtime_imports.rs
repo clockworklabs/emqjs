@@ -4,8 +4,8 @@ use crate::{runtime_externs, with_active_ctx, Volatile};
 use once_cell::sync::Lazy;
 use once_cell::unsync::OnceCell;
 use rkyv::Archive;
-use rquickjs::{qjs, Ctx, FromJs, Persistent};
-use rquickjs::{IntoJs, Rest};
+use rquickjs::function::Rest;
+use rquickjs::{qjs, Ctx, FromJs, IntoJs, Persistent};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -127,9 +127,13 @@ fn wrap_export<'js>(
                 let e = e.restore(ctx)?;
                 // println!("Got exception {e:?}");
                 return Ok(Some(unsafe {
-                    rquickjs::Value::from_js_value(
+                    rquickjs::Value::from_raw(
                         ctx,
-                        qjs::JS_Throw(ctx.as_ptr(), e.into_js_value()),
+                        qjs::JS_Throw(ctx.as_raw().as_ptr(), {
+                            let e_raw = e.as_raw();
+                            std::mem::forget(e);
+                            e_raw
+                        }),
                     )
                 }));
             }

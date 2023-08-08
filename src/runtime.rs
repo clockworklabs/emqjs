@@ -2,7 +2,8 @@ mod data_structures;
 mod runtime_externs;
 mod runtime_imports;
 
-use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Rest, Runtime, Value};
+use rquickjs::function::Rest;
+use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Runtime, Value};
 use std::cell::Cell;
 
 // Workaround for https://github.com/emscripten-core/emscripten/issues/19236.
@@ -79,7 +80,7 @@ mod web_assembly {
     }
 
     impl InstantiationResultPromiseLike {
-        pub fn then<'js>(&'js self, resolve: Function<'js>) -> rquickjs::Result<Value> {
+        pub fn then<'js>(&self, resolve: Function<'js>) -> rquickjs::Result<Value<'js>> {
             resolve.call((&self.result,))
         }
     }
@@ -93,8 +94,8 @@ mod web_assembly {
 
     impl InstantiationResult {
         #[quickjs(get)]
-        pub fn instance(&self) -> &Instance {
-            &self.instance
+        pub fn instance(&self) -> Instance {
+            self.instance.clone()
         }
     }
 
@@ -133,11 +134,11 @@ mod web_assembly {
 
     impl Memory {
         #[quickjs(get)]
-        pub fn buffer<'js>(self, ctx: Ctx<'js>) -> Value<'js> {
+        pub fn buffer<'js>(&self, ctx: Ctx<'js>) -> Value<'js> {
             unsafe {
                 let available_memory = std::arch::wasm32::memory_size::<0>() * 64 * 1024;
                 let handle = rquickjs::qjs::JS_NewArrayBuffer(
-                    ctx.as_ptr(),
+                    ctx.as_raw().as_ptr(),
                     // Yup, giving it a "slice" of the whole memory from 0-pointer to the end.
                     // What could possibly go wrong? 😅
                     std::ptr::null_mut(),
@@ -146,7 +147,7 @@ mod web_assembly {
                     std::ptr::null_mut(),
                     0,
                 );
-                Value::from_js_value(ctx, handle)
+                Value::from_raw(ctx, handle)
             }
         }
     }
@@ -201,7 +202,7 @@ mod emscripten {
 thread_local! {
     // Workaround for rquickjs::Context not using a recursive Mutex, so we can't get Ctx again when Wasm calls back into JS via emqjs_invoke_import.
     // Dangerous because it erases the lifetime and only safe to access via `with_active_ctx` that scopes lifetimes back.
-    static ACTIVE_CTX: Cell<Option<Ctx<'static>>> = Cell::new(None);
+    static ACTIVE_CTX: Cell<Option<std::ptr::NonNull<rquickjs::qjs::JSContext>>> = Cell::new(None);
 }
 
 pub(crate) fn with_active_ctx<'js, T>(f: impl FnOnce(Ctx<'js>) -> T) -> T {
@@ -211,7 +212,7 @@ pub(crate) fn with_active_ctx<'js, T>(f: impl FnOnce(Ctx<'js>) -> T) -> T {
             .expect("tried to call into JS outside of active context");
 
         // scope lifetime back
-        let active_ctx = unsafe { std::mem::transmute::<Ctx<'static>, Ctx<'js>>(active_ctx) };
+        let active_ctx = unsafe { Ctx::<'js>::from_raw(active_ctx) };
 
         f(active_ctx)
     })
@@ -236,10 +237,7 @@ fn start() -> anyhow::Result<()> {
                 active_ctx.get().is_none(),
                 "tried to set active context while another one is active"
             );
-            active_ctx.set(Some(unsafe {
-                // erase lifetime to static so that we could put it into the thread-local
-                std::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx)
-            }));
+            active_ctx.set(Some(ctx.as_raw()));
             let js_bytes = unsafe {
                 let mut bytes = Vec::with_capacity(runtime_externs::js_len());
                 runtime_externs::js(bytes.as_mut_ptr());
