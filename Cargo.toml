@@ -14,11 +14,11 @@ walrus = "0.20.1"
 
 [[bin]]
 name = "emqjs_preprocess"
-path = "src/preprocess.rs"
+path = "src/preprocess/bin.rs"
 
 [lib]
 name = "emqjs_runtime"
-path = "src/runtime.rs"
+path = "src/runtime/lib.rs"
 crate-type = ["staticlib"]
 
 [target.'cfg(not(windows))'.dependencies]

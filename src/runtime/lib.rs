@@ -1,6 +1,8 @@
+#[path = "../data_structures.rs"]
 mod data_structures;
-mod runtime_externs;
-mod runtime_imports;
+
+mod externs;
+mod imports;
 
 use rquickjs::function::Rest;
 use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Runtime, Value};
@@ -118,7 +120,7 @@ mod web_assembly {
         _module: i32,
         imports: Object<'js>,
     ) -> rquickjs::Result<InstantiationResultPromiseLike> {
-        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
+        let exports = imports::provide_imports(ctx, imports.get("env")?)?;
         Ok(InstantiationResultPromiseLike {
             result: InstantiationResult {
                 instance: Instance {
@@ -191,7 +193,7 @@ mod emscripten {
         imports: Object<'js>,
         callback: Function,
     ) -> rquickjs::Result<()> {
-        let exports = runtime_imports::provide_imports(ctx, imports.get("env")?)?;
+        let exports = imports::provide_imports(ctx, imports.get("env")?)?;
         let instance = web_assembly::Instance {
             exports: rquickjs::Persistent::save(ctx, exports),
         };
@@ -239,9 +241,9 @@ fn start() -> anyhow::Result<()> {
             );
             active_ctx.set(Some(ctx.as_raw()));
             let js_bytes = unsafe {
-                let mut bytes = Vec::with_capacity(runtime_externs::js_len());
-                runtime_externs::js(bytes.as_mut_ptr());
-                bytes.set_len(runtime_externs::js_len());
+                let mut bytes = Vec::with_capacity(externs::js_len());
+                externs::js(bytes.as_mut_ptr());
+                bytes.set_len(externs::js_len());
                 bytes
             };
             let result = ctx.eval(js_bytes);

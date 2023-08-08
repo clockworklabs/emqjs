@@ -1,6 +1,6 @@
 use crate::data_structures::{ArchivedExport, FuncType, Module, ValueKind, EMQJS_VALUE_SPACE_LEN};
 use crate::web_assembly::{Memory, Table};
-use crate::{runtime_externs, with_active_ctx, Volatile};
+use crate::{externs, with_active_ctx, Volatile};
 use once_cell::sync::Lazy;
 use once_cell::unsync::OnceCell;
 use rkyv::Archive;
@@ -34,9 +34,9 @@ impl WasmCtx {
         imports: rquickjs::Object<'js>,
     ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
         static MODULE_BYTES: Lazy<Vec<u8>> = Lazy::new(|| unsafe {
-            let mut bytes = Vec::with_capacity(runtime_externs::encoded_module_len());
-            runtime_externs::encoded_module(bytes.as_mut_ptr());
-            bytes.set_len(runtime_externs::encoded_module_len());
+            let mut bytes = Vec::with_capacity(externs::encoded_module_len());
+            externs::encoded_module(bytes.as_mut_ptr());
+            bytes.set_len(externs::encoded_module_len());
             bytes
         });
 
@@ -74,7 +74,7 @@ impl WasmCtx {
                 ArchivedExport::Func(e) => {
                     let func = wrap_export(ctx, &e.ty, move || {
                         // println!("Invoking export {i} (original name {name})", name = e.name);
-                        unsafe { runtime_externs::invoke_export(i) }
+                        unsafe { externs::invoke_export(i) }
                     })?;
                     exports.set(e.name.as_str(), func)
                 }
@@ -89,7 +89,7 @@ impl WasmCtx {
                             };
                             wrap_export(ctx, ty, move || {
                                 // println!("Invoking table {i}");
-                                unsafe { runtime_externs::invoke_table(i) }
+                                unsafe { externs::invoke_table(i) }
                             })
                             .map(Some)
                         })

@@ -1,3 +1,4 @@
+#[path = "../data_structures.rs"]
 mod data_structures;
 
 use anyhow::Context;
