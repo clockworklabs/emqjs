@@ -5,7 +5,8 @@ use once_cell::sync::Lazy;
 use once_cell::unsync::OnceCell;
 use rkyv::Archive;
 use rquickjs::function::Rest;
-use rquickjs::{qjs, Ctx, FromJs, IntoJs, Persistent};
+use rquickjs::{Ctx, FromJs, IntoJs};
+use std::sync::atomic::AtomicBool;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -21,7 +22,7 @@ static mut EMQJS_VALUE_SPACE: Volatile<[Value; EMQJS_VALUE_SPACE_LEN]> =
     Volatile::new([Value { i64: 0 }; EMQJS_VALUE_SPACE_LEN]);
 
 #[no_mangle]
-static mut EMQJS_EXCEPTION: Option<Persistent<rquickjs::Value>> = None;
+static EMQJS_HAD_EXCEPTION: AtomicBool = AtomicBool::new(false);
 
 struct WasmCtx {
     module: &'static <Module as Archive>::Archived,
@@ -110,19 +111,10 @@ fn wrap_export<'js>(
 
             invoke_callback();
 
-            if let Some(e) = unsafe { EMQJS_EXCEPTION.take() } {
-                let e = e.restore(ctx)?;
-                // println!("Got exception {e:?}");
-                return Ok(Some(unsafe {
-                    rquickjs::Value::from_raw(
-                        ctx,
-                        qjs::JS_Throw(ctx.as_raw().as_ptr(), {
-                            let e_raw = e.as_raw();
-                            std::mem::forget(e);
-                            e_raw
-                        }),
-                    )
-                }));
+            if EMQJS_HAD_EXCEPTION.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                // rethrow exception;
+                // actual exception is still stored in the context so this is equivalent to `Err(ctx.throw(ctx.catch()))`
+                return Err(rquickjs::Error::Exception);
             }
 
             let result = ty
@@ -223,12 +215,10 @@ pub extern "C" fn emqjs_invoke_import(index: usize) -> bool {
                 Ok(true)
             }
             Err(rquickjs::Error::Exception) => {
-                unsafe {
-                    if EMQJS_EXCEPTION.is_none() {
-                        let e = ctx.catch();
-                        EMQJS_EXCEPTION = Some(Persistent::save(ctx, e));
-                    }
-                }
+                // actual exception is stored in the context;
+                // we only need to store our own flag because `ctx.catch()` returns JS `null` value
+                // both in case of `throw null` and in case of no exception
+                EMQJS_HAD_EXCEPTION.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(false)
             }
             Err(e) => Err(e),
