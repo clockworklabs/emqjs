@@ -595,7 +595,9 @@ impl PreprocessCtx {
             }
 
             fn visit_call(&mut self, instr: &Call) {
-                self.block_might_throw = self.might_throw(instr.func);
+                // Note: we visit function regardless of current block status
+                // as we want all functions to be in the "might throw" cache.
+                self.block_might_throw |= self.might_throw(instr.func);
             }
 
             fn visit_call_indirect(&mut self, _instr: &CallIndirect) {
