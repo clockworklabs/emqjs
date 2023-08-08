@@ -22,4 +22,4 @@ path = "src/runtime/lib.rs"
 crate-type = ["staticlib"]
 
 [target.'cfg(not(windows))'.dependencies]
-rquickjs = { git = "https://github.com/RReverser/rquickjs", branch = "wasi", features = ["macro", "parallel"] }
+rquickjs = { git = "https://github.com/RReverser/rquickjs", branch = "wasi", features = ["macro"] }
