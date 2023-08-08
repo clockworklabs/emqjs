@@ -5,7 +5,7 @@ mod externs;
 mod imports;
 
 use rquickjs::function::Rest;
-use rquickjs::{bind, Context, Ctx, Function, HasRefs, Object, Runtime, Value};
+use rquickjs::{bind, CatchResultExt, Context, Ctx, Function, HasRefs, Object, Runtime, Value};
 use std::cell::Cell;
 
 // Workaround for https://github.com/emscripten-core/emscripten/issues/19236.
@@ -232,26 +232,33 @@ fn start() -> anyhow::Result<()> {
         Ok(())
     })?;
 
-    context.with(|ctx| -> rquickjs::Result<_> {
-        ACTIVE_CTX.with(|active_ctx| {
-            // println!("Setting active context: {ctx:?}", ctx = ctx.as_ptr());
-            assert!(
-                active_ctx.get().is_none(),
-                "tried to set active context while another one is active"
-            );
-            active_ctx.set(Some(ctx.as_raw()));
-            let js_bytes = unsafe {
-                let mut bytes = Vec::with_capacity(externs::js_len());
-                externs::js(bytes.as_mut_ptr());
-                bytes.set_len(externs::js_len());
-                bytes
-            };
-            let result = ctx.eval(js_bytes);
-            // println!("Unsetting active context");
-            active_ctx.set(None);
-            result
+    context
+        .with(|ctx| {
+            ACTIVE_CTX.with(|active_ctx| {
+                // println!("Setting active context: {ctx:?}", ctx = ctx.as_ptr());
+                assert!(
+                    active_ctx.get().is_none(),
+                    "tried to set active context while another one is active"
+                );
+                active_ctx.set(Some(ctx.as_raw()));
+                let js_bytes = unsafe {
+                    let mut bytes = Vec::with_capacity(externs::js_len());
+                    externs::js(bytes.as_mut_ptr());
+                    bytes.set_len(externs::js_len());
+                    bytes
+                };
+                let result: rquickjs::Result<()> = ctx.eval(js_bytes);
+                // println!("Unsetting active context");
+                active_ctx.set(None);
+                result.catch(ctx).map_err(|e| e.to_string())
+            })
         })
-    })?;
+        .map_err(anyhow::Error::msg)?;
+
+    while runtime
+        .execute_pending_job()
+        .map_err(|e| anyhow::Error::msg(e.to_string()))?
+    {}
 
     Ok(())
 }
