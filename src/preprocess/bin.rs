@@ -2,7 +2,9 @@
 mod data_structures;
 
 use anyhow::Context;
-use data_structures::{Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_VALUE_SPACE_LEN};
+use data_structures::{
+    Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ALT_STACK_LEN, EMQJS_VALUE_SPACE_LEN,
+};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
@@ -834,6 +836,36 @@ fn threaded_main() -> anyhow::Result<()> {
     ctx.write_to_static_byte_array("encoded_module", emqjs_encoded_module)?;
 
     ctx.write_to_static_byte_array("js", std::fs::read(input_js)?)?;
+
+    {
+        let emqjs_alt_stack = take_export(&mut ctx.module, "EMQJS_ALT_STACK")
+            .and_then(unwrap_enum!(ExportItem::Global))?;
+        // Make it mutable as we want to reuse it for stored stack.
+        ctx.module.globals.get_mut(emqjs_alt_stack).mutable = true;
+        let emqjs_alt_stack_initial_value =
+            Ok(&mut ctx.module.globals.get_mut(emqjs_alt_stack).kind)
+                .and_then(unwrap_enum!(GlobalKind::Local))
+                .and_then(unwrap_enum!(InitExpr::Value))
+                .and_then(unwrap_enum!(Value::I32))?;
+        *emqjs_alt_stack_initial_value += EMQJS_ALT_STACK_LEN as i32;
+
+        let stack_pointer = take_export(&mut ctx.module, "__stack_pointer")
+            .and_then(unwrap_enum!(ExportItem::Global))?;
+
+        let mut new_func = FunctionBuilder::new(&mut ctx.module.types, &[], &[]);
+        new_func.name("emqjs_swap_stack".to_owned());
+
+        new_func
+            .func_body()
+            .global_get(stack_pointer)
+            .global_get(emqjs_alt_stack)
+            .global_set(stack_pointer)
+            .global_set(emqjs_alt_stack);
+
+        let new_func_id = new_func.finish(vec![], &mut ctx.module.funcs);
+
+        ctx.replace_emqjs_import("swap_stack", new_func_id)?;
+    }
 
     // Original _start is preserved in the trampoline now.
     // Replace the Wasm `_start` with `emqjs_start` export that starts the JS runtime instead.

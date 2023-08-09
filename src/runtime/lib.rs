@@ -265,5 +265,12 @@ fn start() -> anyhow::Result<()> {
 
 #[no_mangle]
 pub fn emqjs_start() {
+    // Since we start in the JS land, change the stack pointer to alternative stack right away.
+    // This is to ensure that Emscripten functions to manipulate the stack refer to the original pointer as they
+    // will be called on the Wasm side and will get stack swapped for them.
+    unsafe {
+        externs::swap_stack();
+    }
+
     start().unwrap();
 }

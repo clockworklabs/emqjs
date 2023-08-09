@@ -10,4 +10,6 @@ extern "C" {
 
     pub fn invoke_export(index: usize);
     pub fn invoke_table(index: usize);
+
+    pub fn swap_stack();
 }

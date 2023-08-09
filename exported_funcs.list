@@ -2,3 +2,5 @@ __start
 _emqjs_invoke_import
 _emqjs_start
 _EMQJS_VALUE_SPACE
+___stack_pointer
+_EMQJS_ALT_STACK

@@ -1,4 +1,6 @@
-use crate::data_structures::{ArchivedExport, FuncType, Module, ValueKind, EMQJS_VALUE_SPACE_LEN};
+use crate::data_structures::{
+    ArchivedExport, FuncType, Module, ValueKind, EMQJS_ALT_STACK_LEN, EMQJS_VALUE_SPACE_LEN,
+};
 use crate::web_assembly::{Memory, Table};
 use crate::{externs, with_active_ctx, Volatile};
 use once_cell::sync::Lazy;
@@ -20,6 +22,28 @@ union Value {
 #[no_mangle]
 static mut EMQJS_VALUE_SPACE: Volatile<[Value; EMQJS_VALUE_SPACE_LEN]> =
     Volatile::new([Value { i64: 0 }; EMQJS_VALUE_SPACE_LEN]);
+
+#[no_mangle]
+static mut EMQJS_ALT_STACK: [u8; EMQJS_ALT_STACK_LEN] = [0; EMQJS_ALT_STACK_LEN];
+
+struct StackSwapToken;
+
+impl StackSwapToken {
+    fn new() -> Self {
+        unsafe {
+            externs::swap_stack();
+        }
+        Self
+    }
+}
+
+impl Drop for StackSwapToken {
+    fn drop(&mut self) {
+        unsafe {
+            externs::swap_stack();
+        }
+    }
+}
 
 #[no_mangle]
 static EMQJS_HAD_EXCEPTION: AtomicBool = AtomicBool::new(false);
@@ -109,7 +133,11 @@ fn wrap_export<'js>(
                 .zip(unsafe { EMQJS_VALUE_SPACE.iter_mut() })
                 .try_for_each(|(value, slot)| value.map(|value| *slot = value))?;
 
-            invoke_callback();
+            {
+                // Swap stack to Wasm one for the duration of the call.
+                let _token = StackSwapToken::new();
+                invoke_callback();
+            }
 
             if EMQJS_HAD_EXCEPTION.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 // rethrow exception;
@@ -181,6 +209,8 @@ fn from_js<'js>(
 
 #[no_mangle]
 pub extern "C" fn emqjs_invoke_import(index: usize) -> bool {
+    // Swap stack to the JS one for the duration of the call.
+    let _token = StackSwapToken::new();
     let (ty, func) = IMPORTS_CTX.with(|imports_ctx| {
         let imports_ctx = imports_ctx.get().expect("imports weren't provided yet");
         let ty = &imports_ctx.module.imports[index].ty;

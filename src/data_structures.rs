@@ -49,3 +49,6 @@ pub struct Module {
 
 // The maximum number of parameters to any function is 1000. (c) the spec
 pub const EMQJS_VALUE_SPACE_LEN: usize = 1000;
+
+// Size of the alternative stack (used for the JS engine).
+pub const EMQJS_ALT_STACK_LEN: usize = 1_048_576;
