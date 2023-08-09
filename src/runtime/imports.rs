@@ -23,8 +23,13 @@ union Value {
 static mut EMQJS_VALUE_SPACE: Volatile<[Value; EMQJS_VALUE_SPACE_LEN]> =
     Volatile::new([Value { i64: 0 }; EMQJS_VALUE_SPACE_LEN]);
 
+// stack pointer must have 16-byte alignment
+// https://github.com/WebAssembly/tool-conventions/blob/main/BasicCABI.md#the-linear-stack
+#[repr(align(16))]
+struct AltStack([u8; EMQJS_ALT_STACK_LEN]);
+
 #[no_mangle]
-static mut EMQJS_ALT_STACK: [u8; EMQJS_ALT_STACK_LEN] = [0; EMQJS_ALT_STACK_LEN];
+static mut EMQJS_ALT_STACK: AltStack = AltStack([0; EMQJS_ALT_STACK_LEN]);
 
 struct StackSwapToken;
 
