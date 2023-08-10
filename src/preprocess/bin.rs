@@ -5,6 +5,7 @@ use anyhow::Context;
 use data_structures::{
     Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ALT_STACK_LEN, EMQJS_VALUE_SPACE_LEN,
 };
+use indexmap::IndexMap;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
@@ -379,8 +380,11 @@ impl PreprocessCtx {
             "Resizable tables are not supported"
         );
 
+        let mut emqjs_invoke_table =
+            FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
+        emqjs_invoke_table.name("emqjs_invoke_table".to_owned());
+
         let mut types = vec![None; table.initial as usize];
-        let mut dests = vec![None; table.initial as usize];
 
         for &elem_id in &table.elem_segments {
             let elems = self.module.elements.get(elem_id);
@@ -397,85 +401,121 @@ impl PreprocessCtx {
                 .members
                 .iter()
                 .zip(&mut types[offset..])
-                .zip(&mut dests[offset..])
-                .filter_map(|((&func_id, type_dst), func_dst)| Some((func_id?, type_dst, func_dst)))
-                .try_for_each(|(func_id, type_dst, func_dst)| -> anyhow::Result<_> {
+                .filter_map(|(&func_id, type_dst)| Some((func_id?, type_dst)))
+                .try_for_each(|(func_id, type_dst)| -> anyhow::Result<_> {
                     let func = self.module.funcs.get(func_id);
                     let func_ty = self.module.types.get(func.ty());
-                    let converted_ty = convert_func_type(func_ty)?;
-                    *type_dst = Some(converted_ty);
-                    *func_dst = Some(func_id);
+                    *type_dst = Some(func_ty);
                     Ok(())
                 })?;
         }
 
-        let mut emqjs_invoke_table =
-            FunctionBuilder::new(&mut self.module.types, &[ValType::I32], &[]);
-        emqjs_invoke_table.name("emqjs_invoke_table".to_owned());
+        let mut type_blocks = IndexMap::<&Type, InstrSeqId>::new();
+
+        let func_id_param = self.module.locals.add(ValType::I32);
 
         // Create bunch of dangling blocks that for now only convert params-results and call their corresponding function.
         let space = self.emqjs_value_space;
 
         let thrown = self.thrown;
 
-        let block_builders = types.iter().zip(&dests).map(|(func_ty, func_id)| {
-            move |block: &mut InstrSeqBuilder| {
-                let func_ty = match func_ty {
-                    Some(func_ty) => func_ty,
-                    None => {
-                        // This is a hole in the table. Trap here.
-                        block.unreachable();
-                        return;
-                    }
-                };
+        let mut func_body = emqjs_invoke_table.func_body();
 
-                let call_func = |block: &mut InstrSeqBuilder| {
-                    for (i, &param_ty) in func_ty.params.iter().enumerate() {
-                        EmqjsSlot {
-                            space,
-                            builder: block,
-                            ty: param_ty,
-                            index: i,
-                        }
-                        .make_load();
-                    }
-                    block.call(func_id.expect("if func_ty is Some, func_id must be Some"));
-                };
-                match &func_ty.result {
-                    None => {
-                        call_func(block);
-                    }
-                    Some(result_ty) => EmqjsSlot {
+        let top_block_id = func_body.dangling_instr_seq(None).id();
+
+        let mut block_id = top_block_id;
+        for &func_ty in &types {
+            let Some(func_ty) = func_ty else {
+                continue;
+            };
+            let indexmap::map::Entry::Vacant(entry) = type_blocks.entry(func_ty) else {
+                continue;
+            };
+
+            // the block we'll want to break out from to invoke this type of function
+            let nested_id = func_body.dangling_instr_seq(None).id();
+            // associate this function type with the nested block for the br_table so it knows to break out into our current `block`
+            entry.insert(nested_id);
+            // fill the current block with the nested block followed by typed invocation
+            // nested blocks all end in `br $top_block` so typed invocation is only reachable via innermost `br_table`
+            let block = &mut func_body.instr_seq(block_id);
+            block.instr(Block { seq: nested_id });
+            let converted_ty = convert_func_type(func_ty)?;
+            let call_func = |block: &mut InstrSeqBuilder| {
+                for (i, &param_ty) in converted_ty.params.iter().enumerate() {
+                    EmqjsSlot {
                         space,
                         builder: block,
-                        ty: *result_ty,
-                        index: 0,
+                        ty: param_ty,
+                        index: i,
                     }
-                    .make_store(call_func),
+                    .make_load();
                 }
-
-                // Stop unwinding, it's now responsibility of JS to check for exceptions.
-                block.i32_const(0);
-                block.global_set(thrown);
-
-                block.return_();
+                block
+                    .local_get(func_id_param)
+                    .call_indirect(func_ty.id(), table.id());
+            };
+            match &converted_ty.result {
+                None => call_func(block),
+                Some(result_ty) => EmqjsSlot {
+                    space,
+                    builder: block,
+                    ty: *result_ty,
+                    index: 0,
+                }
+                .make_store(call_func),
             }
-        });
+            // in the end of the current block we want to break out into the top block
+            // which does the exception cleanup
+            block.br(top_block_id);
+            // finally, set current block to the nested one we created
+            block_id = nested_id;
+        }
+        // add block that catches table holes (unknown type) and unknown function ids
+        {
+            let nested_id = func_body.dangling_instr_seq(None).id();
+            func_body
+                .instr_seq(block_id)
+                .instr(Block { seq: nested_id })
+                .unreachable();
+            block_id = nested_id;
+        }
 
-        let discriminant = self.module.locals.add(ValType::I32);
+        // we don't have any more types, fill the innermost block with the `br_table` that jumps to matching type handler based on function id
+        // or just outside to the `unreachable` trap if function id is out of bounds or there is no type
+        func_body
+            .instr_seq(block_id)
+            .local_get(func_id_param)
+            .br_table(
+                types
+                    .iter()
+                    .map(|ty| ty.map_or(block_id, |ty| type_blocks[ty]))
+                    .collect(),
+                block_id,
+            );
 
-        Self::build_switch(
-            discriminant,
-            &mut emqjs_invoke_table.func_body(),
-            Vec::new(),
-            block_builders,
-        );
+        // finish the function body by inserting the top block & the exception cleanup all blocks jump out to after the calls
+        func_body
+            .instr(Block { seq: top_block_id })
+            // Stop unwinding, it's now responsibility of JS to check for exceptions.
+            .i32_const(0)
+            .global_set(thrown);
 
-        let new_func_id = emqjs_invoke_table.finish(vec![discriminant], &mut self.module.funcs);
+        let new_func_id = emqjs_invoke_table.finish(vec![func_id_param], &mut self.module.funcs);
+
+        let converted_types = types
+            .iter()
+            .map(|&ty| {
+                Some(
+                    convert_func_type(ty?)
+                        .expect("convert_func_type already fallibly checked above"),
+                )
+            })
+            .collect();
 
         self.replace_emqjs_import("invoke_table", new_func_id)?;
 
-        Ok(types)
+        Ok(converted_types)
     }
 
     fn finish_replacements(&mut self) -> anyhow::Result<()> {

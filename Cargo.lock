@@ -114,6 +114,7 @@ name = "emqjs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "indexmap 2.0.0",
  "once_cell",
  "rkyv",
  "rquickjs",
