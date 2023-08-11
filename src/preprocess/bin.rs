@@ -814,6 +814,8 @@ impl EmqjsSlot<'_, '_> {
 }
 
 fn threaded_main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
     let mut args = std::env::args().skip(1);
     let input_wasm = args.next().context("No input wasm file provided")?;
     let input_js = Path::new(&input_wasm).with_extension("js");
