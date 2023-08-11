@@ -1,7 +1,8 @@
 #!/bin/bash
 set -e
 WASI_SDK_PATH=/opt/wasi-sdk cargo rustc --lib --target wasm32-wasi -- -C target-feature=+bulk-memory,+mutable-globals
-emcc -o temp.js temp.cpp target/wasm32-wasi/debug/libemqjs_runtime.a \
+wasm-ld --whole-archive --relocatable target/wasm32-wasi/debug/libemqjs_runtime.a -o target/wasm32-wasi/debug/emqjs_runtime.o
+emcc -o temp.js temp.cpp target/wasm32-wasi/debug/emqjs_runtime.o \
 	-s WASM_BIGINT \
 	-s ENVIRONMENT=shell \
 	-s STANDALONE_WASM \
