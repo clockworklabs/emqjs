@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-WASI_SDK_PATH=/opt/wasi-sdk cargo rustc --lib --target wasm32-wasi -- -C target-feature=+bulk-memory,+mutable-globals
+WASI_SDK_PATH=/opt/wasi-sdk cargo rustc -p emqjs-runtime --target wasm32-wasi -- -C target-feature=+bulk-memory,+mutable-globals
 wasm-ld --whole-archive --relocatable target/wasm32-wasi/debug/libemqjs_runtime.a -o target/wasm32-wasi/debug/emqjs_runtime.o
 emcc -o temp.js temp.cpp target/wasm32-wasi/debug/emqjs_runtime.o \
 	-s WASM_BIGINT \
@@ -14,5 +14,5 @@ emcc -o temp.js temp.cpp target/wasm32-wasi/debug/emqjs_runtime.o \
 	-fexceptions \
 	-s WARN_ON_UNDEFINED_SYMBOLS=0 \
 	-s STACK_SIZE=1mb
-cargo run --bin emqjs_preprocess -- temp.wasm temp.out.wasm
+cargo run -p emqjs-preprocess -- temp.wasm temp.out.wasm
 wasmtime temp.out.wasm --dir=.

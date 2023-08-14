@@ -1,8 +1,5 @@
-#[path = "../data_structures.rs"]
-mod data_structures;
-
 use anyhow::Context;
-use data_structures::{
+use emqjs_shared::{
     Func, FuncType, Module as EmqjsModule, ValueKind, EMQJS_ALT_STACK_LEN, EMQJS_VALUE_SPACE_LEN,
 };
 use indexmap::IndexMap;
@@ -848,7 +845,7 @@ fn threaded_main() -> anyhow::Result<()> {
     let func_exports = ctx.process_func_exports()?;
     let mut exports = func_exports
         .into_iter()
-        .map(data_structures::Export::Func)
+        .map(emqjs_shared::Export::Func)
         .collect::<Vec<_>>();
     let table_export = ctx
         .module
@@ -859,7 +856,7 @@ fn threaded_main() -> anyhow::Result<()> {
         let name = e.name.to_owned();
         ctx.module.exports.delete(e.id());
         let types = ctx.process_table()?;
-        exports.push(data_structures::Export::Table { name, types });
+        exports.push(emqjs_shared::Export::Table { name, types });
     }
     let mem_export = ctx
         .module
@@ -868,12 +865,13 @@ fn threaded_main() -> anyhow::Result<()> {
         .find(|e| matches!(e.item, ExportItem::Memory(_)));
     // Note: memory export must not be deleted.
     if let Some(e) = mem_export {
-        exports.push(data_structures::Export::Memory {
+        exports.push(emqjs_shared::Export::Memory {
             name: e.name.to_owned(),
         });
     }
 
-    let emqjs_encoded_module = rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?;
+    let emqjs_encoded_module =
+        emqjs_shared::rkyv::to_bytes::<_, 1024>(&EmqjsModule { imports, exports })?;
 
     ctx.write_to_static_byte_array("encoded_module", emqjs_encoded_module)?;
 

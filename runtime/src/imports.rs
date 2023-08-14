@@ -1,14 +1,14 @@
-use crate::data_structures::{
-    ArchivedExport, FuncType, Module, ValueKind, EMQJS_ALT_STACK_LEN, EMQJS_VALUE_SPACE_LEN,
-};
 use crate::web_assembly::{Memory, Table};
 use crate::{externs, with_active_ctx, Volatile};
-use once_cell::sync::Lazy;
-use once_cell::unsync::OnceCell;
+use emqjs_shared::rkyv;
+use emqjs_shared::{
+    ArchivedExport, FuncType, Module, ValueKind, EMQJS_ALT_STACK_LEN, EMQJS_VALUE_SPACE_LEN,
+};
 use rkyv::Archive;
 use rquickjs::function::Rest;
 use rquickjs::{Ctx, FromJs, IntoJs};
 use std::sync::atomic::AtomicBool;
+use std::sync::OnceLock;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -63,14 +63,18 @@ impl WasmCtx {
         ctx: rquickjs::Ctx<'js>,
         imports: rquickjs::Object<'js>,
     ) -> rquickjs::Result<(Self, rquickjs::Object<'js>)> {
-        static MODULE_BYTES: Lazy<Vec<u8>> = Lazy::new(|| unsafe {
-            let mut bytes = Vec::with_capacity(externs::encoded_module_len());
-            externs::encoded_module(bytes.as_mut_ptr());
-            bytes.set_len(externs::encoded_module_len());
-            bytes
-        });
+        let module = unsafe {
+            static MODULE_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
 
-        let module = unsafe { rkyv::archived_root::<Module>(&MODULE_BYTES) };
+            let module_bytes = MODULE_BYTES.get_or_init(|| {
+                let mut bytes = Vec::with_capacity(externs::encoded_module_len());
+                externs::encoded_module(bytes.as_mut_ptr());
+                bytes.set_len(externs::encoded_module_len());
+                bytes
+            });
+
+            rkyv::archived_root::<Module>(module_bytes)
+        };
 
         let imports = module
             .imports
@@ -164,7 +168,7 @@ fn wrap_export<'js>(
 }
 
 thread_local! {
-    static IMPORTS_CTX: OnceCell<WasmCtx> = OnceCell::new();
+    static WASM_CTX: OnceLock<WasmCtx> = OnceLock::new();
 }
 
 pub fn provide_imports<'js>(
@@ -172,7 +176,7 @@ pub fn provide_imports<'js>(
     imports: rquickjs::Object<'js>,
 ) -> rquickjs::Result<rquickjs::Object<'js>> {
     let (wasm_ctx, exports) = WasmCtx::new(ctx, imports)?;
-    IMPORTS_CTX.with(|imports_ctx| {
+    WASM_CTX.with(|imports_ctx| {
         imports_ctx
             .set(wasm_ctx)
             .unwrap_or_else(|_| panic!("provide_imports was already called"))
@@ -216,7 +220,7 @@ fn from_js<'js>(
 pub extern "C" fn emqjs_invoke_import(index: usize) -> bool {
     // Swap stack to the JS one for the duration of the call.
     let _token = StackSwapToken::new();
-    let (ty, func) = IMPORTS_CTX.with(|imports_ctx| {
+    let (ty, func) = WASM_CTX.with(|imports_ctx| {
         let imports_ctx = imports_ctx.get().expect("imports weren't provided yet");
         let ty = &imports_ctx.module.imports[index].ty;
         let func = imports_ctx.imports[index].clone();

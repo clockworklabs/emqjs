@@ -1,5 +1,7 @@
 //! Shared data structure for Wasm preprocessor and the runtime.
 
+pub use rkyv;
+
 use rkyv::{Archive, Serialize};
 
 #[derive(Debug, Archive, Serialize, Clone, Copy)]

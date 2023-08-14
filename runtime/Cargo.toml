@@ -1,0 +1,14 @@
+[package]
+name = "emqjs-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+emqjs-shared = { path = "../shared" }
+anyhow = "1.0.70"
+
+[target.'cfg(not(windows))'.dependencies]
+rquickjs = { git = "https://github.com/RReverser/rquickjs", branch = "wasi", features = ["macro"] }

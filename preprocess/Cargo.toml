@@ -1,0 +1,12 @@
+[package]
+name = "emqjs-preprocess"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+emqjs-shared = { path = "../shared" }
+anyhow = "1.0.70"
+indexmap = "2.0.0"
+tracing-subscriber = "0.3.17"
+walrus = "0.20.1"
+tracing = "0.1.37"

@@ -110,17 +110,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "emqjs"
+name = "emqjs-preprocess"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "emqjs-shared",
  "indexmap 2.0.0",
- "once_cell",
- "rkyv",
- "rquickjs",
  "tracing",
  "tracing-subscriber",
  "walrus",
+]
+
+[[package]]
+name = "emqjs-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "emqjs-shared",
+ "rquickjs",
+]
+
+[[package]]
+name = "emqjs-shared"
+version = "0.1.0"
+dependencies = [
+ "rkyv",
 ]
 
 [[package]]
